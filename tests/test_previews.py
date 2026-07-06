@@ -176,3 +176,27 @@ def test_undo_step_cap_still_applies(monkeypatch):
     for _ in range(canvas_mod.MAX_HISTORY + 10):
         store.snapshot(cid)
     assert len(store.entry(cid).undo_stack) == canvas_mod.MAX_HISTORY
+
+
+# ── _place_generated (remote result placement) ──────────────────────
+
+def test_place_generated_new_canvas():
+    out = srv._place_generated(Image.new("RGB", (32, 32)), canvas_id=None,
+                               layer_name="gen")
+    assert out["ok"] and out["canvas_id"] in list(store.list_ids())
+
+
+def test_place_generated_appends_layer_never_wipes():
+    # Build a 2-layer canvas with history; placing a result must add a 3rd
+    # layer and stay undoable, not replace the whole document.
+    cid = store.put_image(Image.new("RGB", (40, 40), (1, 2, 3)))
+    store.snapshot(cid)
+    store.add_layer(cid, name="second")
+    before_layers = len(store.entry(cid).layers)
+    out = srv._place_generated(Image.new("RGB", (40, 40), (9, 9, 9)),
+                               canvas_id=cid, layer_name="gen")
+    e = store.entry(cid)
+    assert len(e.layers) == before_layers + 1, "must append, not replace"
+    assert "new_layer_index" in out
+    assert store.undo(cid) is True, "placement must be undoable"
+    assert len(store.entry(cid).layers) == before_layers

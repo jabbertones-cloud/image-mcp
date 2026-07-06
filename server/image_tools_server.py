@@ -107,6 +107,22 @@ def _encode_preview(img, *, max_size: int | None = None,
             rgb = _fit_within(rgb, int(max(rgb.size) * 3 // 4))
 
 
+def _place_generated(img, *, canvas_id: str | None, layer_name: str) -> dict[str, Any]:
+    """Land a freshly generated image on a canvas without ever destroying an
+    existing document: if ``canvas_id`` names a live canvas, snapshot it (so the
+    add is undoable) and append the result as a new active layer; otherwise
+    create a new canvas. Fixes the trap where put_image on an existing id
+    replaced the whole entry, wiping its layers and undo history."""
+    rgba = img if img.mode == "RGBA" else img.convert("RGBA")
+    if canvas_id is not None and store.has(canvas_id):
+        store.snapshot(canvas_id)
+        idx = store.add_layer(canvas_id, name=layer_name)
+        store.replace_active_image(canvas_id, rgba)
+        return _summary(canvas_id) | {"new_layer_index": idx}
+    cid = store.put_image(rgba, canvas_id=canvas_id, layer_name=layer_name)
+    return _summary(cid)
+
+
 def _summary(canvas_id: str) -> dict[str, Any]:
     """Standard response shape after a mutating op."""
     e = store.entry(canvas_id)
@@ -3445,6 +3461,328 @@ def set_config(key: str, value: str) -> dict:
     from . import server_config
     server_config.set(key, value)
     return {"key": key, "value": value, "config": server_config.get_all()}
+
+
+# ============================================================ remote generation
+#
+# These tools call a paired remote_server pod (RunPod). The server runs the
+# heavy DiT denoising and returns the LATENT only; this client decodes the
+# latent locally with its own VAE. Latents are ~30x smaller than PNG over the
+# wire, the server never holds a recognisable image, and your local GPU
+# handles the cheap VAE pass.
+#
+# Setup: see docs/REMOTE_GEN.md.
+
+
+@mcp.tool()
+def remote_status() -> dict:
+    """Verify the paired remote_server is reachable, the fingerprint matches
+    the pin, and report which model the pod has loaded."""
+    from . import remote_gen
+    return remote_gen.verify_server()
+
+
+@mcp.tool()
+def remote_qwen_txt2img(
+    prompt: str,
+    *,
+    negative_prompt: str | None = None,
+    width: int = 1024,
+    height: int = 1024,
+    steps: int = 20,
+    cfg: float = 4.0,
+    seed: int = 0,
+    canvas_id: str | None = None,
+    loras: list[dict] | None = None,
+) -> dict:
+    """Generate an image with Qwen-Image on the remote pod, decode locally.
+
+    The paired remote pod must have ``REMOTE_MODEL=qwen-image``. Returns a
+    canvas with the decoded image as the active layer.
+
+    ``loras`` is a list of ``{"path": "...", "weight": 1.0}`` entries. The
+    client computes sha256 per file; the first request sends just the hash,
+    the server responds 404 if cache-miss, and the client retries with the
+    bytes attached. Subsequent requests in the same pod lifetime are
+    by-reference only.
+    """
+    from . import remote_gen
+    img = remote_gen.remote_qwen_txt2img(
+        prompt=prompt, negative_prompt=negative_prompt,
+        width=width, height=height, steps=steps, cfg=cfg, seed=seed,
+        loras=loras,
+    )
+    return _place_generated(img, canvas_id=canvas_id,
+                            layer_name=f"qwen txt2img: {prompt[:40]}")
+
+
+@mcp.tool()
+def remote_qwen_edit(
+    canvas_id: str,
+    prompt: str,
+    *,
+    negative_prompt: str | None = None,
+    width: int | None = None,
+    height: int | None = None,
+    steps: int = 25,
+    cfg: float = 4.0,
+    seed: int = 0,
+    loras: list[dict] | None = None,
+) -> dict:
+    """Send the active layer of ``canvas_id`` as the control image to a
+    Qwen-Image-Edit-2511 pod, decode the returned latent locally, and place
+    the result as a new layer on the same canvas.
+
+    The paired remote pod must have ``REMOTE_MODEL=qwen-image-edit-2511``.
+    See ``remote_qwen_txt2img`` for the LoRA upload semantics.
+    """
+    from . import remote_gen
+    control = store.get_active_image(canvas_id).convert("RGB")
+    edited = remote_gen.remote_qwen_edit(
+        control_image=control, prompt=prompt,
+        negative_prompt=negative_prompt,
+        width=width, height=height,
+        steps=steps, cfg=cfg, seed=seed,
+        loras=loras,
+    )
+    return _place_generated(edited, canvas_id=canvas_id,
+                            layer_name=f"qwen edit: {prompt[:40]}")
+
+
+@mcp.tool()
+def remote_lora_list() -> dict:
+    """List the LoRAs currently cached on the remote server.
+
+    Returns ``{"count": int, "entries": [{"sha256", "size", "mtime"}, ...]}``
+    sorted by mtime DESC. Use this to confirm whether a previously-uploaded
+    LoRA is still in cache (it may have been LRU-evicted) before issuing a
+    big generate. The mtime is updated on cache HIT, so the order reflects
+    LRU-style usage.
+    """
+    from . import remote_gen
+    return remote_gen.remote_list_loras()
+
+
+@mcp.tool()
+def remote_lora_evict(sha256: str) -> dict:
+    """Force-evict a cached LoRA by sha256. Useful when rotating credentials
+    or when you want to guarantee the next request re-uploads the bytes
+    (e.g., to verify the LoRA file you have locally hashes the same way the
+    server is using)."""
+    from . import remote_gen
+    return remote_gen.remote_evict_lora(sha256)
+
+
+@mcp.tool()
+def remote_lora_download_hf(
+    repo: str,
+    filename: str,
+    *,
+    revision: str | None = None,
+    hf_token: str | None = None,
+) -> dict:
+    """Tell the SERVER to fetch a LoRA from HuggingFace and cache it in RAM.
+
+    ``repo`` is ``user/repo``; ``filename`` is the file inside, typically
+    ``pytorch_lora_weights.safetensors``. The returned ``sha256`` is the
+    handle subsequent ``remote_qwen_*`` calls reference via
+    ``loras=[{"sha256": "...", "weight": 1.0}]`` — no bytes leave your PC.
+
+    ``hf_token`` overrides the pod's REMOTE_HF_TOKEN env (use for gated
+    repos)."""
+    from . import remote_gen
+    return remote_gen.remote_download_lora(
+        source="hf", repo=repo, filename=filename,
+        revision=revision, hf_token=hf_token,
+    )
+
+
+@mcp.tool()
+def remote_lora_download_civitai(
+    *,
+    model_id: int | None = None,
+    version_id: int | None = None,
+    civitai_url: str | None = None,
+    civitai_token: str | None = None,
+) -> dict:
+    """Tell the SERVER to fetch a LoRA from Civitai and cache it in RAM.
+
+    Pass any ONE of:
+      * ``version_id`` — fastest, direct download of a specific revision.
+      * ``model_id`` — server resolves the latest published version.
+      * ``civitai_url`` — server parses model/version IDs out of a model page URL.
+
+    Returns ``{sha256, bytes_cached, source}``. ``civitai_token`` overrides
+    the pod's REMOTE_CIVITAI_API_KEY env (some models are gated)."""
+    from . import remote_gen
+    return remote_gen.remote_download_lora(
+        source="civitai",
+        model_id=model_id, version_id=version_id,
+        civitai_url=civitai_url, civitai_token=civitai_token,
+    )
+
+
+@mcp.tool()
+def remote_server_status() -> dict:
+    """Tripwire + lockdown status on the remote pod.
+
+    Returns ``{tripwire_armed, compromised, compromise_trigger, loras_cached,
+    pipeline_ready}``. ``compromised`` true means the pod's tripwire has
+    detected an intrusion (docker exec / ptrace / process suspend); secrets
+    have been wiped and the pod refuses to serve. **Discard that pod and
+    provision a fresh one** — its identity material is no longer trustworthy.
+
+    Call this before any sensitive generation to confirm the pod's still
+    clean."""
+    from . import remote_gen
+    return remote_gen.remote_server_status()
+
+
+# ============================================================ watcher / queue
+#
+# The session module holds two singletons started lazily on first call:
+#   * AutoAbortWatcher — polls remote_server_status every 10s; on any
+#     compromise / unreachable, marks the session compromised and cancels
+#     every pending queue job. All subsequent remote_* calls raise.
+#   * GenerationQueue — single-worker FIFO that serializes remote calls.
+#     Submit returns a job_id; status / result / cancel / clear let you
+#     drive a small batch from MCP.
+
+
+@mcp.tool()
+def remote_watcher_status() -> dict:
+    """State of the auto-abort watcher: armed/running, last polled, last
+    known server status, and (if tripped) the trigger."""
+    from . import remote_session
+    sess = remote_session.get_session(start_watcher=True, start_queue=False)
+    w = sess.watcher
+    return {
+        "armed":               w is not None and w._thread is not None,
+        "last_polled_at":      (w.last_polled_at if w else 0.0),
+        "last_status":         (w.last_status if w else None),
+        "session_compromised": sess.compromised,
+        "compromise_trigger":  sess.compromise_trigger,
+        "compromise_detail":   sess.compromise_detail,
+    }
+
+
+@mcp.tool()
+def remote_watcher_stop() -> dict:
+    """Stop the auto-abort watcher. Use only if you're shutting down the
+    MCP session — the watcher will restart on the next remote tool call."""
+    from . import remote_session
+    sess = remote_session.get_session(start_watcher=False, start_queue=False)
+    if sess.watcher:
+        sess.watcher.stop()
+    return {"stopped": True}
+
+
+@mcp.tool()
+def remote_queue_submit_txt2img(
+    prompt: str,
+    *,
+    negative_prompt: str | None = None,
+    width: int = 1024,
+    height: int = 1024,
+    steps: int = 20,
+    cfg: float = 4.0,
+    seed: int = 0,
+    loras: list[dict] | None = None,
+    canvas_id: str | None = None,
+) -> dict:
+    """Queue a txt2img generation. Returns ``{"job_id": "..."}``. The job
+    runs FIFO on a single worker thread; result lands on ``canvas_id``
+    when ``done`` (or a freshly-created canvas if None). Poll
+    ``remote_queue_status`` for progress."""
+    from . import remote_session
+    sess = remote_session.get_session()
+    params = {
+        "prompt":          prompt,
+        "negative_prompt": negative_prompt,
+        "width":           int(width),
+        "height":          int(height),
+        "steps":           int(steps),
+        "cfg":             float(cfg),
+        "seed":            int(seed),
+        "loras":           loras,
+    }
+    # canvas allocation: caller picks canvas_id, or None → create on submit
+    cid = canvas_id
+    if cid is None:
+        from PIL import Image as PILImage
+        cid = store.put_image(
+            PILImage.new("RGBA", (int(width), int(height)), (0, 0, 0, 0)),
+            layer_name=f"queued txt2img: {prompt[:40]}",
+        )
+    job_id = sess.queue.submit("txt2img", params, canvas_id=cid)
+    return {"job_id": job_id, "canvas_id": cid}
+
+
+@mcp.tool()
+def remote_queue_submit_edit(
+    canvas_id: str,
+    prompt: str,
+    *,
+    negative_prompt: str | None = None,
+    width: int | None = None,
+    height: int | None = None,
+    steps: int = 25,
+    cfg: float = 4.0,
+    seed: int = 0,
+    loras: list[dict] | None = None,
+) -> dict:
+    """Queue an edit-2511 generation using the active layer of ``canvas_id``
+    as the control image. Result lands as a new layer on the same canvas."""
+    from . import remote_session
+    sess = remote_session.get_session()
+    # snapshot the control image NOW so a later canvas mutation doesn't
+    # change what gets sent
+    control = store.get_active_image(canvas_id).convert("RGB")
+    params = {
+        "control_image":   control,
+        "prompt":          prompt,
+        "negative_prompt": negative_prompt,
+        "width":           width,
+        "height":          height,
+        "steps":           int(steps),
+        "cfg":             float(cfg),
+        "seed":            int(seed),
+        "loras":           loras,
+    }
+    job_id = sess.queue.submit("edit", params, canvas_id=canvas_id)
+    return {"job_id": job_id, "canvas_id": canvas_id}
+
+
+@mcp.tool()
+def remote_queue_status() -> dict:
+    """Snapshot of the queue: counts by status, currently-running job_id,
+    list of every tracked job. Heavy params (control images) are stripped
+    from the per-job entries."""
+    from . import remote_session
+    sess = remote_session.get_session()
+    return sess.queue.status()
+
+
+@mcp.tool()
+def remote_queue_cancel(job_id: str) -> dict:
+    """Cancel a queued job (no-op for running/done/failed jobs).
+
+    Returns ``{"cancelled": bool, "job_id": "..."}``. Running jobs CAN'T
+    be interrupted mid-flight (remote pod has accepted the request) but
+    will be marked cancelled and the result discarded on completion."""
+    from . import remote_session
+    sess = remote_session.get_session()
+    cancelled = sess.queue.cancel(job_id)
+    return {"cancelled": cancelled, "job_id": job_id}
+
+
+@mcp.tool()
+def remote_queue_clear() -> dict:
+    """Cancel every queued job AND drop every held result. The running
+    job (if any) continues but its result will be discarded."""
+    from . import remote_session
+    sess = remote_session.get_session()
+    return {"cancelled": sess.queue.clear()}
 
 
 # ============================================================ entry
