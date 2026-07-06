@@ -41,20 +41,70 @@ mcp = FastMCP("image-tools-mcp")
 
 # ============================================================ helpers
 
-def _img_to_png_bytes(img, *, max_size: int | None = None) -> bytes:
-    """Encode for MCP transport. Optionally downscale for previews."""
-    out = img
-    if max_size and (out.width > max_size or out.height > max_size):
-        ratio = max_size / max(out.width, out.height)
-        out = out.resize(
-            (max(1, int(out.width * ratio)), max(1, int(out.height * ratio))),
-            resample=2,  # BILINEAR; fast for previews
+# Preview transport budget: base64 inflates ~4/3, and oversized inline images
+# eat the model's context window. Images small enough in pixels stay lossless
+# PNG (graphics, masks, line art compress well); larger photographic content
+# goes JPEG. Both paths shrink until under budget. `lossless=True` forces PNG
+# (colour-exact) for callers like inspect_region that promise pixel fidelity.
+_PREVIEW_PNG_PIXELS = 400_000   # ~632x632; below this PNG is cheap and small
+_PREVIEW_BUDGET = 1_200_000
+
+
+def _has_transparency(img) -> bool:
+    if img.mode in ("RGBA", "LA", "PA"):
+        lo, _hi = img.getchannel("A").getextrema()
+        return lo < 255
+    return img.mode == "P" and "transparency" in img.info
+
+
+def _fit_within(img, max_size: int | None):
+    """Downscale so the longest edge is <= max_size (never upscales)."""
+    if max_size and max(img.size) > max_size:
+        ratio = max_size / max(img.size)
+        return img.resize(
+            (max(1, int(img.width * ratio)), max(1, int(img.height * ratio))),
+            resample=PILImage.LANCZOS,
         )
+    return img
+
+
+def _encode_preview(img, *, max_size: int | None = None,
+                    lossless: bool = False) -> tuple[bytes, str, tuple[int, int]]:
+    """Encode a preview within the transport budget.
+
+    Returns ``(bytes, format, (width, height))`` where the size is the actual
+    returned image — callers report the true scale from it rather than assuming
+    ``max_size`` was the final size (the budget loop may shrink further).
+
+    PNG (lossless) is used for images with real transparency, when ``lossless``
+    is requested, or when the image is small in pixels; other content uses JPEG.
+    """
+    out = _fit_within(img, max_size)
     if out.mode not in ("RGB", "RGBA", "L", "LA", "P"):
         out = out.convert("RGBA")
-    buf = io.BytesIO()
-    out.save(buf, format="PNG")
-    return buf.getvalue()
+
+    keep_png = (lossless or _has_transparency(out)
+                or out.width * out.height <= _PREVIEW_PNG_PIXELS)
+    if keep_png:
+        # JPEG would drop alpha / lose exactness, so shrink rather than switch.
+        while True:
+            buf = io.BytesIO()
+            out.save(buf, format="PNG")
+            if buf.tell() <= _PREVIEW_BUDGET or max(out.size) <= 256:
+                return buf.getvalue(), "png", out.size
+            out = _fit_within(out, int(max(out.size) * 3 // 4))
+
+    rgb = out if out.mode == "RGB" else io_formats._coerce_for_format(out, "JPEG")
+    quality = 85
+    while True:
+        buf = io.BytesIO()
+        rgb.save(buf, format="JPEG", quality=quality)
+        if buf.tell() <= _PREVIEW_BUDGET or (quality <= 50 and max(rgb.size) <= 512):
+            return buf.getvalue(), "jpeg", rgb.size
+        if quality > 50:
+            quality -= 15
+        else:
+            rgb = _fit_within(rgb, int(max(rgb.size) * 3 // 4))
 
 
 def _summary(canvas_id: str) -> dict[str, Any]:
@@ -160,10 +210,81 @@ def get_canvas_info(canvas_id: str) -> dict:
 
 @mcp.tool()
 def get_canvas_preview(canvas_id: str, *, max_size: int = 512) -> MCPImage:
-    """Return a downscaled PNG preview of the composited canvas. Useful for
-    inline display. Default max edge is 512 px."""
-    png = _img_to_png_bytes(store.compose(canvas_id), max_size=max_size)
-    return MCPImage(data=png, format="png")
+    """Return a downscaled preview of the composited canvas. Useful for
+    inline display. Default max edge is 512 px. For a 1:1 look at part of a
+    large canvas use inspect_region instead."""
+    data, fmt, _ = _encode_preview(store.compose(canvas_id), max_size=max_size)
+    return MCPImage(data=data, format=fmt)
+
+
+@mcp.tool()
+def inspect_region(canvas_id: str, x: int, y: int, width: int, height: int, *,
+                   max_size: int = 768) -> list:
+    """Look at a rectangular region of the composited canvas at native
+    resolution — the zoom tool. get_canvas_preview downscales the whole
+    canvas, which hides fine detail on large documents; this composites only
+    the region and returns it lossless (PNG), so colours and pixels are exact.
+
+    Coordinates are clamped to the canvas. If the region is larger than
+    max_size (or too large for the transport budget) it is downscaled and the
+    true scale it was returned at is reported."""
+    e = store.entry(canvas_id)
+    cw, ch = e.width, e.height
+    x0, y0 = max(0, int(x)), max(0, int(y))
+    if x0 >= cw or y0 >= ch:
+        raise ValueError(
+            f"Region origin ({x}, {y}) is outside the {cw}x{ch} "
+            "canvas. x must be < width and y < height."
+        )
+    x1 = min(cw, x0 + max(1, int(width)))
+    y1 = min(ch, y0 + max(1, int(height)))
+    crop = store.compose_region(canvas_id, (x0, y0, x1, y1))
+    # lossless so the promised pixel/colour fidelity actually holds; the
+    # returned size tells us the real scale after any budget downscale.
+    data, fmt, (ow, oh) = _encode_preview(crop, max_size=max_size, lossless=True)
+    scale = ow / crop.width
+    note = (f"Region ({x0},{y0})-({x1},{y1}) of {cw}x{ch} canvas"
+            + (f", downscaled to {scale:.0%} ({ow}x{oh}) — request a smaller "
+               "region for 1:1 pixels." if scale < 0.999 else " at 1:1 pixel scale."))
+    return [note, MCPImage(data=data, format=fmt)]
+
+
+@mcp.tool()
+def canvases_overview(*, max_canvases: int = 24, tile_size: int = 320) -> list:
+    """Visual inventory: one contact sheet showing every open canvas,
+    labelled with its canvas_id and dimensions. Useful after segmentation or
+    multi-canvas workflows to see what's in the store without previewing each
+    canvas individually. Order matches list_canvases."""
+    from PIL import ImageDraw
+
+    summaries = store.summary()
+    if not summaries:
+        return ["No canvases open. Use new_canvas or open_canvas first."]
+    shown = summaries[:max_canvases]
+
+    tiles = []
+    for s in shown:
+        img = _fit_within(store.compose(s["canvas_id"]), tile_size).convert("RGB")
+        tiles.append((s, img))
+
+    cols = min(4, len(tiles))
+    rows = (len(tiles) + cols - 1) // cols
+    label_h = 20
+    cell_h = max(t.height for _, t in tiles) + label_h
+    sheet = PILImage.new("RGB", (tile_size * cols, cell_h * rows), (24, 24, 24))
+    draw = ImageDraw.Draw(sheet)
+    font = drawing._resolve_font(None, 13)
+    for i, (s, t) in enumerate(tiles):
+        cx, cy = (i % cols) * tile_size, (i // cols) * cell_h
+        draw.text((cx + 4, cy + 3),
+                  f"{s['canvas_id']}  {s['width']}x{s['height']}  L{s['n_layers']}",
+                  fill=(255, 255, 120), font=font)
+        sheet.paste(t, (cx, cy + label_h))
+
+    data, fmt, _ = _encode_preview(sheet)
+    note = (f"{len(shown)} of {len(summaries)} canvases shown"
+            + (" (increase max_canvases for the rest)." if len(summaries) > len(shown) else "."))
+    return [note, MCPImage(data=data, format=fmt)]
 
 
 @mcp.tool()
@@ -602,8 +723,8 @@ def get_layer_preview(canvas_id: str, index: int, *,
     """Return an inline preview of a single layer's image (no compositing,
     no mask applied — shows the layer's raw pixels)."""
     layer = store.entry(canvas_id).layers[index]
-    png = _img_to_png_bytes(layer.image, max_size=max_size)
-    return MCPImage(data=png, format="png")
+    data, fmt, _ = _encode_preview(layer.image, max_size=max_size)
+    return MCPImage(data=data, format=fmt)
 
 
 # ============================================================ layer masks
@@ -2042,8 +2163,8 @@ def mask_preview(canvas_id: str, mask_canvas_ids: list[str], *,
         colors=colors, alpha=alpha,
         show_bbox=show_bbox, labels=labels,
     )
-    png = _img_to_png_bytes(out, max_size=int(max_size))
-    return MCPImage(data=png, format="png")
+    data, fmt, _ = _encode_preview(out, max_size=int(max_size))
+    return MCPImage(data=data, format=fmt)
 
 
 # ============================================================ YOLO segmentation

@@ -75,9 +75,14 @@ class Layer:
 
 # ---- compositing -----------------------------------------------------------
 
-def _to_canvas_array(layer: Layer, canvas_size: tuple[int, int]) -> np.ndarray:
+def _to_canvas_array(layer: Layer, canvas_size: tuple[int, int],
+                     origin: tuple[int, int] = (0, 0)) -> np.ndarray:
     """Render ``layer`` onto a canvas-sized HxWx4 float array, applying offset,
     layer mask, and per-layer opacity to the alpha channel.
+
+    ``origin`` shifts the output window so a sub-region can be composited into a
+    smaller buffer: pass the region's top-left and ``canvas_size`` as the region
+    size to avoid allocating the full canvas per layer.
 
     Returns zeros outside the layer's footprint so downstream blending treats
     those pixels as fully transparent.
@@ -89,6 +94,8 @@ def _to_canvas_array(layer: Layer, canvas_size: tuple[int, int]) -> np.ndarray:
 
     lw, lh = layer.image.size
     ox, oy = layer.offset
+    ox -= origin[0]
+    oy -= origin[1]
 
     # Intersection of [0,lw)x[0,lh) shifted by (ox,oy) with [0,w)x[0,h).
     sx1 = max(0, -ox)
@@ -206,14 +213,26 @@ def _composite_over(dst: np.ndarray, src: np.ndarray, mode: str) -> np.ndarray:
     return out
 
 
-def compose_layers(layers: list[Layer], canvas_size: tuple[int, int]) -> Image.Image:
-    """Flatten ``layers`` (bottom-to-top) onto a fresh canvas. Returns RGBA."""
-    w, h = canvas_size
+def compose_layers(layers: list[Layer], canvas_size: tuple[int, int],
+                   region: tuple[int, int, int, int] | None = None) -> Image.Image:
+    """Flatten ``layers`` (bottom-to-top) onto a fresh canvas. Returns RGBA.
+
+    ``region`` is an optional ``(x0, y0, x1, y1)`` box in canvas coordinates;
+    when given, only that rectangle is composited (into a region-sized buffer),
+    which avoids allocating full-canvas arrays when zooming into a large doc.
+    """
+    if region is None:
+        w, h = canvas_size
+        origin = (0, 0)
+    else:
+        x0, y0, x1, y1 = region
+        w, h = x1 - x0, y1 - y0
+        origin = (x0, y0)
     acc = np.zeros((h, w, 4), dtype=np.float32)
     for layer in layers:
         if not layer.visible or layer.opacity <= 0:
             continue
-        src = _to_canvas_array(layer, canvas_size)
+        src = _to_canvas_array(layer, (w, h), origin)
         acc = _composite_over(acc, src, layer.blend_mode)
     rgba = (np.clip(acc, 0.0, 1.0) * 255.0 + 0.5).astype(np.uint8)
     return Image.fromarray(rgba, mode="RGBA")

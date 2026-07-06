@@ -15,6 +15,7 @@ mutation can be rolled back atomically.
 """
 from __future__ import annotations
 
+import os
 import threading
 import uuid
 from dataclasses import dataclass, field
@@ -25,13 +26,40 @@ from PIL import Image
 from .layers import Layer, compose_layers
 
 MAX_HISTORY = 32
+# Byte budget for undo history across ALL open canvases. Snapshots deep-copy
+# every layer, so 32 steps on a 4K-class canvas would otherwise pin gigabytes
+# of RAM — and the real resource is process RAM, not any single canvas, so the
+# cap is store-wide. When over budget the globally-oldest undo snapshot is
+# evicted first, always leaving each canvas at least one undo step. Redo stacks
+# are never byte-trimmed: a redo stack can only grow by moving snapshots off
+# the (already-capped) undo stack, so it inherits the same bound, and trimming
+# it from either end would silently discard reachable redo states.
+MAX_HISTORY_MB = int(os.environ.get("IMAGETOOLS_UNDO_MAX_MB", "512"))
+
+
+def _layers_cost(layers: list[Layer]) -> int:
+    """Approximate resident bytes of a layer stack (RGBA + optional mask)."""
+    total = 0
+    for l in layers:
+        total += l.image.width * l.image.height * 4
+        if l.mask is not None:
+            total += l.mask.width * l.mask.height
+    return total
 
 
 @dataclass
 class CanvasState:
-    """Snapshot-able state. Stored on the undo/redo stacks."""
+    """Snapshot-able state. Stored on the undo/redo stacks. ``cost`` is derived
+    from ``layers`` and ``seq`` is a global capture order used to evict the
+    oldest undo snapshot across canvases; callers never set them by hand."""
     layers: list[Layer]
     active_index: int
+    cost: int = 0
+    seq: int = 0
+
+    def __post_init__(self) -> None:
+        if not self.cost:
+            self.cost = _layers_cost(self.layers)
 
 
 @dataclass
@@ -57,6 +85,34 @@ class CanvasStore:
     def __init__(self) -> None:
         self._lock = threading.RLock()
         self._items: dict[str, CanvasEntry] = {}
+        self._seq = 0  # monotonic capture counter for global undo eviction
+
+    # --------------------------------------------------------------- history
+    def _capture(self, e: CanvasEntry) -> CanvasState:
+        """Deep-copy the current layer stack into a history snapshot."""
+        self._seq += 1
+        return CanvasState(
+            layers=[l.copy() for l in e.layers],
+            active_index=e.active_index,
+            seq=self._seq,
+        )
+
+    def _enforce_global_undo_budget(self) -> None:
+        """Evict the globally-oldest undo snapshot until total undo bytes fit
+        the store-wide budget, always keeping >=1 undo step per canvas."""
+        budget = MAX_HISTORY_MB * 1024 * 1024
+        total = sum(s.cost for e in self._items.values() for s in e.undo_stack)
+        while total > budget:
+            oldest = min(
+                (e.undo_stack[0] for e in self._items.values() if len(e.undo_stack) > 1),
+                key=lambda s: s.seq, default=None,
+            )
+            if oldest is None:  # every stack down to its last step
+                break
+            for e in self._items.values():
+                if e.undo_stack and e.undo_stack[0] is oldest:
+                    total -= e.undo_stack.pop(0).cost
+                    break
 
     # --------------------------------------------------------------- lifecycle
     def put_image(self, image: Image.Image, *, canvas_id: str | None = None,
@@ -79,6 +135,10 @@ class CanvasStore:
                 layers=list(layers), active_index=len(layers) - 1, path=path,
             )
             return cid
+
+    def has(self, canvas_id: str) -> bool:
+        with self._lock:
+            return canvas_id in self._items
 
     def entry(self, canvas_id: str) -> CanvasEntry:
         with self._lock:
@@ -119,6 +179,13 @@ class CanvasStore:
         """Flatten visible layers into a single RGBA image."""
         e = self.entry(canvas_id)
         return compose_layers(e.layers, e.size)
+
+    def compose_region(self, canvas_id: str,
+                       box: tuple[int, int, int, int]) -> Image.Image:
+        """Flatten visible layers over just ``box`` (x0, y0, x1, y1), composited
+        into a region-sized buffer — cheap for zooming into a large canvas."""
+        e = self.entry(canvas_id)
+        return compose_layers(e.layers, e.size, region=box)
 
     def active_layer(self, canvas_id: str) -> Layer:
         return self.entry(canvas_id).active_layer
@@ -233,29 +300,22 @@ class CanvasStore:
             e.layers = [Layer(name="Background", image=flat)]
             e.active_index = 0
 
-    # --------------------------------------------------------------- history
     def snapshot(self, canvas_id: str) -> None:
         """Capture pre-mutation state. Clears redo (new branch)."""
         with self._lock:
             e = self.entry(canvas_id)
-            state = CanvasState(
-                layers=[l.copy() for l in e.layers],
-                active_index=e.active_index,
-            )
-            e.undo_stack.append(state)
-            if len(e.undo_stack) > MAX_HISTORY:
+            e.undo_stack.append(self._capture(e))
+            while len(e.undo_stack) > MAX_HISTORY:
                 e.undo_stack.pop(0)
             e.redo_stack.clear()
+            self._enforce_global_undo_budget()
 
     def undo(self, canvas_id: str) -> bool:
         with self._lock:
             e = self.entry(canvas_id)
             if not e.undo_stack:
                 return False
-            e.redo_stack.append(CanvasState(
-                layers=[l.copy() for l in e.layers],
-                active_index=e.active_index,
-            ))
+            e.redo_stack.append(self._capture(e))
             prev = e.undo_stack.pop()
             e.layers = prev.layers
             e.active_index = prev.active_index
@@ -266,13 +326,13 @@ class CanvasStore:
             e = self.entry(canvas_id)
             if not e.redo_stack:
                 return False
-            e.undo_stack.append(CanvasState(
-                layers=[l.copy() for l in e.layers],
-                active_index=e.active_index,
-            ))
+            e.undo_stack.append(self._capture(e))
+            while len(e.undo_stack) > MAX_HISTORY:
+                e.undo_stack.pop(0)
             nxt = e.redo_stack.pop()
             e.layers = nxt.layers
             e.active_index = nxt.active_index
+            self._enforce_global_undo_budget()
             return True
 
     # --------------------------------------------------------------- canvas-wide
