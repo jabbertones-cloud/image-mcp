@@ -70,3 +70,11 @@ def test_every_ai_module_waits_for_the_prewarm(module, monkeypatch):
         pass  # optional extra missing on this box - the wait still had to come first
     assert calls == [module]
 
+
+def test_sd_never_loads_the_safety_checker():
+    from server import sd
+
+    assert sd._NO_SAFETY == {"safety_checker": None, "requires_safety_checker": False}
+    src = open(sd.__file__, encoding="utf-8").read()
+    assert src.count("**_NO_SAFETY") >= 4, "every from_pretrained path must pass _NO_SAFETY"
+    assert sd.DEFAULT_INPAINT_MODEL == "Lykon/dreamshaper-8-inpainting"

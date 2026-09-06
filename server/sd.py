@@ -27,6 +27,14 @@ from typing import Any
 from PIL import Image
 
 _VALID_KINDS = ("txt2img", "img2img", "inpaint")
+# runwayml/stable-diffusion-inpainting ships pickled .bin weights that torch < 2.6 refuses to
+# load (CVE-2025-32434); dreamshaper-8-inpainting is safetensors-only and already cached here.
+DEFAULT_INPAINT_MODEL = "Lykon/dreamshaper-8-inpainting"
+DEFAULT_MODEL = "runwayml/stable-diffusion-v1-5"
+# SD 1.x checkpoints ship a CLIP "safety checker" that replaces any image it dislikes with a
+# solid black frame - observed 2026-09-07 on a plain lighthouse img2img. This is a local tool
+# for its owner; the checker is never loaded. Pipelines without the component ignore the kwargs.
+_NO_SAFETY = {"safety_checker": None, "requires_safety_checker": False}
 
 # Re-entrant so methods that take the lock can call helpers that also take it
 # (notably ``_touch`` from inside ``_get_pipe``'s critical section).
@@ -272,7 +280,7 @@ def _get_pipe(kind: str, repo: str, *, gguf_path: str | None = None):
             family = _detect_family(repo)
             cls = _controlnet_pipeline_class(family, kind)
             pipe = cls.from_pretrained(
-                repo, controlnet=_controlnet, torch_dtype=_dtype(),
+                repo, controlnet=_controlnet, torch_dtype=_dtype(), **_NO_SAFETY,
             )
             pipe = pipe.to(_device())
         else:
@@ -302,7 +310,7 @@ def _get_pipe(kind: str, repo: str, *, gguf_path: str | None = None):
                             except Exception:
                                 pass
             else:
-                pipe = loader.from_pretrained(repo, torch_dtype=_dtype())
+                pipe = loader.from_pretrained(repo, torch_dtype=_dtype(), **_NO_SAFETY)
                 pipe = pipe.to(_device())
         try:
             pipe.enable_attention_slicing()
@@ -346,7 +354,7 @@ def _load_with_gguf(repo: str, gguf_path: str, loader):
         )
         transformer = _to_cuda(transformer)
         return loader.from_pretrained(
-            repo, transformer=transformer, torch_dtype=_dtype(),
+            repo, transformer=transformer, torch_dtype=_dtype(), **_NO_SAFETY,
         )
     if "sd3" in repo_lower or "stable-diffusion-3" in repo_lower:
         from diffusers import SD3Transformer2DModel
@@ -355,7 +363,7 @@ def _load_with_gguf(repo: str, gguf_path: str, loader):
         )
         transformer = _to_cuda(transformer)
         return loader.from_pretrained(
-            repo, transformer=transformer, torch_dtype=_dtype(),
+            repo, transformer=transformer, torch_dtype=_dtype(), **_NO_SAFETY,
         )
     # Older SD 1.x/2.x — GGUF support is community-maintained and varies by
     # model. Surface a clear error so the caller can pick a different
@@ -509,6 +517,8 @@ def sd_status() -> dict[str, Any]:
         "idle_timeout_s": _idle_timeout_s,
         "auto_evict_enabled": _idle_timeout_s > 0,
         "prewarm": _prewarm_status(),
+        "default_models": {"txt2img": DEFAULT_MODEL, "img2img": DEFAULT_MODEL,
+                           "inpaint": DEFAULT_INPAINT_MODEL},
     }
 
 
@@ -709,7 +719,7 @@ def sd_inpaint(init_image: Image.Image, mask_image: Image.Image,
     _check_available()
     if model is None:
         cached_repo, cached_gguf = _cached_repo_for_kind("inpaint")
-        model = cached_repo or "runwayml/stable-diffusion-inpainting"
+        model = cached_repo or DEFAULT_INPAINT_MODEL
         if gguf_path is None:
             gguf_path = cached_gguf
     pipe = _get_pipe("inpaint", model, gguf_path=gguf_path)
@@ -721,10 +731,13 @@ def sd_inpaint(init_image: Image.Image, mask_image: Image.Image,
     extra = _maybe_controlnet_kwargs(
         "inpaint", control_image, controlnet_conditioning_scale,
     )
+    init = init_image.convert("RGB")
     result = pipe(
         prompt=prompt,
-        image=init_image.convert("RGB"),
+        image=init,
         mask_image=mask_image.convert("L"),
+        # SD inpaint pipelines default to 512x512 regardless of the source; keep the source size.
+        width=init.width, height=init.height,
         negative_prompt=negative_prompt,
         num_inference_steps=int(steps),
         guidance_scale=float(guidance),
