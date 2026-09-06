@@ -122,6 +122,8 @@ def set_idle_timeout(seconds: float) -> dict[str, Any]:
 
 
 def _check_available() -> None:
+    from . import prewarm
+    prewarm.wait()
     try:
         import diffusers  # noqa: F401
         import torch  # noqa: F401
@@ -506,7 +508,13 @@ def sd_status() -> dict[str, Any]:
         "controlnet": cn,
         "idle_timeout_s": _idle_timeout_s,
         "auto_evict_enabled": _idle_timeout_s > 0,
+        "prewarm": _prewarm_status(),
     }
+
+
+def _prewarm_status() -> dict:
+    from . import prewarm
+    return prewarm.status()
 
 
 def load_pipeline(kind: str, model: str, *,

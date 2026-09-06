@@ -135,6 +135,8 @@ _loaded_loras: dict[str, LoraEntry] = {}
 # ---- availability ----------------------------------------------------------
 
 def _check_available() -> None:
+    from . import prewarm
+    prewarm.wait()
     try:
         import diffusers  # noqa: F401
         import torch  # noqa: F401

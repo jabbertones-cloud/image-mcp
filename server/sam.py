@@ -48,6 +48,8 @@ _sweeper_thread: threading.Thread | None = None
 # ---- availability ----------------------------------------------------------
 
 def _check_available() -> None:
+    from . import prewarm
+    prewarm.wait()
     try:
         import sam2  # noqa: F401
         import torch  # noqa: F401

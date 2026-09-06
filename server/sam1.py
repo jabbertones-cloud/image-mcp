@@ -36,6 +36,8 @@ DEFAULT_MODEL = "facebook/sam-vit-large"
 
 
 def _check_available() -> None:
+    from . import prewarm
+    prewarm.wait()
     try:
         from transformers import SamModel, SamProcessor  # noqa: F401
         import torch  # noqa: F401

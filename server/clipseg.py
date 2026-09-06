@@ -33,6 +33,8 @@ DEFAULT_MODEL = "CIDAS/clipseg-rd64-refined"
 
 
 def _check_available() -> None:
+    from . import prewarm
+    prewarm.wait()
     try:
         from transformers import CLIPSegProcessor, CLIPSegForImageSegmentation  # noqa: F401
         import torch  # noqa: F401

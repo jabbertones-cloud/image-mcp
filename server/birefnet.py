@@ -47,6 +47,8 @@ DEFAULT_VARIANT = "general"
 
 
 def _check_available() -> None:
+    from . import prewarm
+    prewarm.wait()
     try:
         import transformers  # noqa: F401
         import torch  # noqa: F401

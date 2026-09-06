@@ -61,6 +61,8 @@ def detect_quant_level(path: str | Path) -> str | None:
 
 def _check_available() -> None:
     """Raise if the GGUF stack isn't installed."""
+    from . import prewarm
+    prewarm.wait()
     missing: list[str] = []
     try:
         import diffusers  # noqa: F401

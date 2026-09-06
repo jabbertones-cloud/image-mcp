@@ -36,6 +36,8 @@ DEFAULT_WEIGHTS = "yolov8l-seg.pt"
 
 
 def _check_available() -> None:
+    from . import prewarm
+    prewarm.wait()
     try:
         import ultralytics  # noqa: F401
         import torch  # noqa: F401

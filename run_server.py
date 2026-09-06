@@ -20,7 +20,6 @@ scipy) to the background thread.
 """
 import os
 import sys
-import threading
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -31,9 +30,8 @@ os.environ.setdefault("HF_DEACTIVATE_ASYNC_LOAD", "1")
 
 
 def _prewarm_light() -> None:
-    """Quick main-thread imports — just the top-level modules. These are
-    fast (~5 s) and prime the module cache so the background thread's
-    deeper imports don't hit the DLL-loader deadlock."""
+    """Quick main-thread imports of the top-level modules (~5 s warm). They prime
+    torch's DLLs so the background thread never fights the main thread over them."""
     try:
         import torch  # noqa: F401
         import transformers  # noqa: F401
@@ -42,41 +40,19 @@ def _prewarm_light() -> None:
         pass
 
 
-def _prewarm_heavy() -> None:
-    """Background-thread imports — the pipeline classes that transitively
-    pull in scipy.optimize → scipy.linalg.blas (the slow DLL load).
-    Running these on a background thread after the light imports have
-    primed the module cache avoids both the MCP-timeout AND the DLL
-    deadlock (the DLL is already loaded by the time scipy needs it via
-    the torch → MKL → BLAS chain that ``import torch`` established above).
-    """
-    try:
-        from diffusers import (  # noqa: F401
-            QwenImageEditPipeline,
-            QwenImageEditPlusPipeline,
-            QwenImageTransformer2DModel,
-            AutoencoderKLQwenImage,
-            FlowMatchEulerDiscreteScheduler,
-        )
-    except Exception:
-        pass
-    try:
-        from transformers import (  # noqa: F401
-            BitsAndBytesConfig,
-            Qwen2_5_VLForConditionalGeneration,
-            Qwen2_5_VLModel,
-            AutoTokenizer,
-            AutoProcessor,
-        )
-    except Exception:
-        pass
-
-
-# Phase 1 — fast, main-thread: prime torch / transformers / diffusers.
+# Phase 1 - main thread: top-level modules.
 _prewarm_light()
 
-# Phase 2 — background: heavy sub-imports (pipeline classes + scipy).
-threading.Thread(target=_prewarm_heavy, daemon=True, name="prewarm").start()
+# Phase 2 - every pipeline / model class the AI tools use, imported ONCE on the
+# main thread (server/prewarm.py) before FastMCP starts. Two lessons from
+# 2026-09-07 (py-spy proof in that module): concurrent lazy imports from two
+# threads deadlock the event loop, and scipy's native extensions freeze when
+# first imported from a non-main thread on Windows. MCPManager's
+# startup_timeout_s for this server covers the ~1-2 min cold start; the child
+# stays resident afterwards. Do not move this back to a thread on Windows.
+from server import prewarm  # noqa: E402
+
+prewarm.start()
 
 from server.image_tools_server import main
 
