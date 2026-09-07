@@ -390,10 +390,36 @@ def _encode_prompts(prompt: str, negative: str | None, cfg: bool, max_len: int) 
 
 def _patch_fp8_experts(text_encoder) -> int:
     """The LLaDA2 MoE text encoder computes its FP8 experts with ``torch._scaled_mm`` using
-    per-row scales, which needs sm_90 (on Ada it raises "Per-row scaling is not supported for this
-    platform"). Swap the per-expert matmul for the modeling file's own dequantise-then-bf16-matmul."""
+    per-row scales (needs sm_90; on Ada it raises "Per-row scaling is not supported") and quantises
+    the activations to float8 first (``index_select`` on float8 is missing before torch 2.6).
+    Replace the reference forward with the same maths on bf16 activations and the modeling file's
+    own per-expert dequantisation - identical to its non-CUDA branch, minus the activation rounding."""
     import torch
     import torch.nn.functional as F
+
+    def _reference_forward(self, hidden_states, routing_weights, selected_experts):
+        selected_experts = selected_experts.reshape(-1, selected_experts.shape[-1])
+        routing_weights = routing_weights.reshape(-1, routing_weights.shape[-1])
+        token_ids = torch.arange(hidden_states.shape[0], device=hidden_states.device)[:, None].expand_as(selected_experts)
+        flat_tokens = token_ids.reshape(-1)
+        flat_experts = selected_experts.reshape(-1)
+        flat_weights = routing_weights.reshape(-1)
+        out = torch.zeros_like(hidden_states)
+        dt = hidden_states.dtype
+        for expert_id_t in torch.unique(flat_experts, sorted=False):
+            expert_id = int(expert_id_t.item())
+            mask = flat_experts == expert_id_t
+            ids = flat_tokens[mask]
+            x = hidden_states.index_select(0, ids)
+            gate_w = self._dequant_expert(self.gate_proj, self.gate_proj_scale, expert_id, dt)
+            up_w = self._dequant_expert(self.up_proj, self.up_proj_scale, expert_id, dt)
+            mid = F.silu(F.linear(x, gate_w)) * F.linear(x, up_w)
+            del gate_w, up_w
+            down_w = self._dequant_expert(self.down_proj, self.down_proj_scale, expert_id, dt)
+            y = F.linear(mid, down_w) * flat_weights[mask, None].to(dt)
+            del down_w, mid
+            out.index_add_(0, ids, y)
+        return out
 
     def _scaled_mm_expert(self, xq, x_scale, weight, weight_scale, expert_id, out_dtype):
         x = (xq.float() * x_scale).to(out_dtype)
@@ -402,7 +428,8 @@ def _patch_fp8_experts(text_encoder) -> int:
     seen: set = set()
     for m in text_encoder.modules():
         cls = type(m)
-        if getattr(m, "use_fp8", False) and hasattr(m, "_scaled_mm_expert") and cls not in seen:
+        if getattr(m, "use_fp8", False) and hasattr(m, "_fp8_reference_forward") and cls not in seen:
+            cls._fp8_reference_forward = _reference_forward
             cls._scaled_mm_expert = _scaled_mm_expert
             seen.add(cls)
     return len(seen)
