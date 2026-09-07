@@ -16,7 +16,8 @@ RAM to spare for CPU offload:
 
 A prompt that was already encoded costs no reload at all. A new prompt costs
 one text-encoder load + one denoiser reload (~25 GB read from the NVMe volume).
-Weights are read through safetensors mmap one shard at a time.
+Weights are read through safetensors mmap straight to the GPU, so system RAM
+is not committed for them.
 
 Models are directories in ``server_config['llada_model_dir']`` (default the
 ComfyUI ``models/diffusers`` folder): ``LLaDA-Image-Turbo-FP8`` (4 steps,
@@ -205,10 +206,12 @@ def _split_fused_keys(state: dict) -> int:
     return n_split
 
 
-def _load_fp8_state_dict(model_dir: Path, dtype) -> tuple[dict, int]:
-    """Read the shards one at a time, dequantise block-FP8 pairs and split fused keys. Every tensor
-    is returned on the CPU in ``dtype``; the caller moves the assembled model to its device.
-    Returns (state_dict, n_dequantised)."""
+def _load_fp8_state_dict(model_dir: Path, dtype, device: str = "cpu",
+                         storage_dtype=None) -> tuple[dict, int]:
+    """Read the shards one at a time, dequantise block-FP8 pairs, split fused keys, and place every
+    tensor on ``device`` as it is produced (block-quantised weights as ``storage_dtype`` when given,
+    e.g. float8, everything else as ``dtype``). Peak host memory is one shard, not the model; the GPU
+    never sees the bf16 copy of the whole transformer. Returns (state_dict, n_dequantised)."""
     from safetensors import safe_open
     index = model_dir / "diffusion_pytorch_model.safetensors.index.json"
     if index.is_file():
@@ -221,12 +224,13 @@ def _load_fp8_state_dict(model_dir: Path, dtype) -> tuple[dict, int]:
     pending_w: dict = {}   # weights whose scale is in a later shard
     pending_s: dict = {}   # scales whose weight is in a later shard
 
-    def place(k, t):
-        out[k] = t.to(dtype) if t.is_floating_point() else t
+    def place(k, t, quantised):
+        t = t.to(storage_dtype if (quantised and storage_dtype is not None) else dtype) if t.is_floating_point() else t
+        out[k] = t.to(device) if device != "cpu" else t
 
     def dequant_pair(k, w, sc):
         nonlocal n_dq
-        place(k, _dequant_block_fp8(w, sc, dtype=dtype, transposed=bool(transposed)))
+        place(k, _dequant_block_fp8(w, sc, dtype=dtype, transposed=bool(transposed)), True)
         n_dq += 1
 
     for shard in shards:
@@ -252,10 +256,10 @@ def _load_fp8_state_dict(model_dir: Path, dtype) -> tuple[dict, int]:
             elif sk and _might_have_scale(k):
                 pending_w[k] = v  # decide when the last shard is read
             else:
-                place(k, v)
+                place(k, v, False)
         del raw
     for k, v in pending_w.items():  # never got a scale: plain tensor
-        place(k, v)
+        place(k, v, False)
     if pending_s:
         raise RuntimeError(f"scale tensors without weights: {sorted(pending_s)[:3]}")
     _split_fused_keys(out)
@@ -268,8 +272,9 @@ def _might_have_scale(key: str) -> bool:
 
 
 def _load_transformer(model_dir: Path, dtype, device: str, fp8_storage: bool):
-    """Build the DiT from config + dequantised weights. With ``fp8_storage`` the weights are re-stored
-    as float8 on the GPU through Diffusers layerwise casting (bf16 compute)."""
+    """Build the DiT from config + dequantised weights streamed straight to ``device``.
+    With ``fp8_storage`` the block-quantised weights land on the GPU as float8 (Diffusers layerwise
+    casting upcasts per layer at forward time); the rest stay ``dtype``."""
     import torch
     from .llada_vendor import LLaDAImageTransformer2DModel
 
@@ -282,13 +287,15 @@ def _load_transformer(model_dir: Path, dtype, device: str, fp8_storage: bool):
     with torch.device("meta"):
         model = LLaDAImageTransformer2DModel.from_config(cfg)
     storage = torch.float8_e4m3fn if (fp8_storage and device == "cuda") else None
-    state, n_dq = _load_fp8_state_dict(model_dir / "transformer", dtype)
+    state, n_dq = _load_fp8_state_dict(model_dir / "transformer", dtype, device=device, storage_dtype=storage)
     missing, unexpected = model.load_state_dict(state, strict=False, assign=True)
     del state
     if unexpected or missing:
         raise RuntimeError(f"transformer checkpoint mismatch: missing={missing[:3]} unexpected={unexpected[:3]}")
     log.info("llada transformer: %d FP8 block tensors dequantised (storage %s)", n_dq, storage or dtype)
-    model = model.to(device, dtype)
+    # Buffers created on the meta device (rope tables etc.) are re-materialised by moving; parameters
+    # are already on ``device`` in their final dtype, so do NOT pass dtype here (it would upcast float8).
+    model = model.to(device)
     if storage is not None:
         model.enable_layerwise_casting(storage_dtype=storage, compute_dtype=dtype)
     return model.eval()
