@@ -75,6 +75,8 @@ def _import_all() -> None:
          "from diffusers import QwenImageEditPipeline, QwenImageEditPlusPipeline, QwenImageTransformer2DModel, "
          "AutoencoderKLQwenImage, FlowMatchEulerDiscreteScheduler, "
          "QwenImageControlNetPipeline, QwenImageControlNetInpaintPipeline, QwenImageControlNetModel"),
+        ("diffusers.llada", "from diffusers import AutoencoderKLFlux2"),
+        ("llada_vendor", "from server import llada_vendor"),
         ("diffusers.loaders", "import diffusers.loaders.peft, diffusers.hooks"),
         ("peft", "import peft"),
     )

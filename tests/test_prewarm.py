@@ -57,7 +57,7 @@ def test_missing_optional_imports_are_recorded_not_fatal(monkeypatch):
     assert prewarm.status()["skipped"] == ["x: ImportError: no"]
 
 
-@pytest.mark.parametrize("module", ["sd", "qwen", "birefnet", "clipseg", "sam", "sam1", "yolo_seg", "gguf_io"])
+@pytest.mark.parametrize("module", ["sd", "qwen", "birefnet", "clipseg", "sam", "sam1", "yolo_seg", "gguf_io", "llada"])
 def test_every_ai_module_waits_for_the_prewarm(module, monkeypatch):
     import importlib
 

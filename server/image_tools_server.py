@@ -28,7 +28,7 @@ from PIL import Image as PILImage
 from . import (
     adjustments, birefnet, blurs, channels, clipseg, conversions, drawing,
     face_swap, gradients, gguf_io, io_formats, layer_effects,
-    layers as layers_mod, mask_ops, painting, palette, patterns,
+    layers as layers_mod, llada, mask_ops, painting, palette, patterns,
     preprocessors, qwen, sam, sam1, sd, stateless, transforms, utilities,
     warp, yolo_seg,
 )
@@ -1837,6 +1837,77 @@ def qwen_controlnet_inpaint(prompt: str, control_canvas_id: str,
     )
     cid = store.put_image(img, canvas_id=canvas_id,
                           layer_name="Qwen CN inpaint")
+    return _summary(cid)
+
+
+# ============================================================ LLaDA-Image
+
+@mcp.tool()
+def llada_status() -> dict:
+    """Report whether LLaDA-Image (inclusionAI, 6B unified text-to-image + editing) can run,
+    which variant is loaded (turbo = 4 steps, base = 50 steps), VRAM use, the prompt-embedding
+    cache size and the model root folder. Models are Diffusers-layout directories in that root."""
+    return llada.status()
+
+
+@mcp.tool()
+def llada_load(*, model: str = "turbo", fp8_storage: bool = True) -> dict:
+    """Pre-load LLaDA-Image so the first generation does not pay the load cost. ``model`` is
+    ``turbo`` (LLaDA-Image-Turbo-FP8: 4 steps, guidance 1.0, fastest) or ``base``
+    (LLaDA-Image-FP8: 50 steps, guidance 5.0, highest quality), or a folder name inside the model
+    root shown by llada_status. ``fp8_storage`` keeps the transformer weights in float8 on the GPU
+    (about half the VRAM; bf16 compute). Idempotent for the same model."""
+    return llada.load(model, fp8_storage=fp8_storage)
+
+
+@mcp.tool()
+def llada_unload() -> dict:
+    """Free the LLaDA-Image pipeline and its prompt-embedding cache."""
+    return llada.unload()
+
+
+@mcp.tool()
+def llada_set_idle_timeout(seconds: float) -> dict:
+    """Idle timeout for the LLaDA-Image pipeline (default 3600 s). 0 disables auto-eviction."""
+    return llada.set_idle_timeout(seconds)
+
+
+@mcp.tool()
+def llada_generate(prompt: str, *, negative_prompt: str | None = None,
+                   width: int = 1024, height: int = 1024, steps: int | None = None,
+                   guidance: float | None = None, seed: int | None = None,
+                   canvas_id: str | None = None) -> dict:
+    """LLaDA-Image text-to-image. Result lands in a new canvas (pass ``canvas_id`` to name it).
+    ``steps`` / ``guidance`` default to the loaded variant's recommendation (turbo: 4 / 1.0,
+    base: 50 / 5.0). Loads ``turbo`` on first use if nothing is loaded. Width and height should be
+    multiples of 16 (1024x1024 is the native resolution; 512-768 is fine for previews).
+
+    Memory model on this machine: the 17 GB text encoder and the denoiser take turns on the GPU,
+    so the first use of a NEW prompt costs an extra ~20-40 s of reloading; repeating a prompt
+    (different seed / size / steps) reuses the cached embeddings and is fast. Strong text
+    rendering (English + Chinese) is a strength of this model."""
+    img = llada.generate(prompt, negative_prompt=negative_prompt, width=width, height=height,
+                         steps=steps, guidance=guidance, seed=seed)
+    cid = store.put_image(img, canvas_id=canvas_id, layer_name="LLaDA generated")
+    return _summary(cid)
+
+
+@mcp.tool()
+def llada_edit(canvas_id: str, prompt: str, *, negative_prompt: str | None = None,
+               width: int | None = None, height: int | None = None, steps: int | None = None,
+               guidance: float | None = None, seed: int | None = None,
+               new_canvas_id: str | None = None) -> dict:
+    """LLaDA-Image instruction-guided editing: the composited ``canvas_id`` is the reference image
+    and ``prompt`` says what to change ("turn it into a watercolor painting", "make the sky night",
+    "replace the text on the sign with ..."). Result is a NEW canvas; the source is untouched.
+    Output size defaults to the source size rounded to a multiple of 32. Same step/guidance
+    defaults and prompt-cache behaviour as llada_generate."""
+    src = store.compose(canvas_id)
+    w = int(width) if width else max(256, (src.width // 32) * 32)
+    h = int(height) if height else max(256, (src.height // 32) * 32)
+    img = llada.generate(prompt, negative_prompt=negative_prompt, width=w, height=h,
+                         steps=steps, guidance=guidance, seed=seed, image=src)
+    cid = store.put_image(img, canvas_id=new_canvas_id, layer_name="LLaDA edit")
     return _summary(cid)
 
 

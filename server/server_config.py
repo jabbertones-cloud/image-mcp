@@ -25,6 +25,8 @@ _DEFAULTS: dict[str, str] = {
     "saved_faces_dir": r"B:\-AI-Stuff-\faces",
     "comfyui_unet_dir": r"B:\-AI-Stuff-\ComfyUI\models\unet",
     "comfyui_vae_dir": r"B:\-AI-Stuff-\ComfyUI\models\vae",
+    # Folder holding Diffusers-layout model directories (LLaDA-Image-Turbo-FP8, LLaDA-Image-FP8, ...).
+    "llada_model_dir": r"B:\-AI-Stuff-\ComfyUI\models\diffusers",
     # Allowlist root for local LoRA files the client may read and upload to a
     # remote pod. os.pathsep-separated for multiple roots. Empty = no local
     # LoRA uploads (server-cached by-sha references still work).
