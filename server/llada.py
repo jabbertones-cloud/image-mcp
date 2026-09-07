@@ -185,8 +185,28 @@ def _detect_scale_orientation(raw: dict, block: int = 128) -> bool:
     return False
 
 
+def _split_fused_keys(state: dict) -> int:
+    """The FP8 export fuses ``attention.to_qkv`` (= [to_q; to_k; to_v]) and ``feed_forward.w13``
+    (= [w1; w3]) SGLang-style; the Diffusers model keeps them separate. Split in place."""
+    n_split = 0
+    for k in list(state):
+        if k.endswith(".attention.to_qkv.weight"):
+            w = state.pop(k)
+            d = w.shape[0] // 3
+            base = k[: -len("to_qkv.weight")]
+            state[base + "to_q.weight"], state[base + "to_k.weight"], state[base + "to_v.weight"] = w[:d], w[d:2 * d], w[2 * d:]
+            n_split += 1
+        elif k.endswith(".feed_forward.w13.weight"):
+            w = state.pop(k)
+            h = w.shape[0] // 2
+            base = k[: -len("w13.weight")]
+            state[base + "w1.weight"], state[base + "w3.weight"] = w[:h], w[h:]
+            n_split += 1
+    return n_split
+
+
 def _load_fp8_state_dict(model_dir: Path, dtype) -> tuple[dict, int]:
-    """Read the shards one at a time and dequantise block-FP8 pairs. Every tensor
+    """Read the shards one at a time, dequantise block-FP8 pairs and split fused keys. Every tensor
     is returned on the CPU in ``dtype``; the caller moves the assembled model to its device.
     Returns (state_dict, n_dequantised)."""
     from safetensors import safe_open
@@ -238,6 +258,7 @@ def _load_fp8_state_dict(model_dir: Path, dtype) -> tuple[dict, int]:
         place(k, v)
     if pending_s:
         raise RuntimeError(f"scale tensors without weights: {sorted(pending_s)[:3]}")
+    _split_fused_keys(out)
     return out, n_dq
 
 

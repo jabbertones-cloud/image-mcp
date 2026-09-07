@@ -90,3 +90,15 @@ def test_resolve_defaults_per_variant(monkeypatch):
     monkeypatch.setattr(llada, "_variant", "base")
     assert llada._resolve_defaults(None, 3.0) == (50, 3.0)
 
+
+def test_split_fused_keys():
+    q, k, v = torch.arange(6.).view(2, 3), torch.arange(6., 12.).view(2, 3), torch.arange(12., 18.).view(2, 3)
+    w1, w3 = torch.ones(4, 3), torch.zeros(4, 3)
+    state = {"layers.0.attention.to_qkv.weight": torch.cat([q, k, v]), "layers.0.feed_forward.w13.weight": torch.cat([w1, w3]),
+             "layers.0.feed_forward.w2.weight": torch.ones(3, 4)}
+    assert llada._split_fused_keys(state) == 2
+    assert torch.equal(state["layers.0.attention.to_q.weight"], q) and torch.equal(state["layers.0.attention.to_k.weight"], k)
+    assert torch.equal(state["layers.0.attention.to_v.weight"], v)
+    assert torch.equal(state["layers.0.feed_forward.w1.weight"], w1) and torch.equal(state["layers.0.feed_forward.w3.weight"], w3)
+    assert "layers.0.attention.to_qkv.weight" not in state and "layers.0.feed_forward.w13.weight" not in state
+    assert "layers.0.feed_forward.w2.weight" in state
