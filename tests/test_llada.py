@@ -14,7 +14,7 @@ def _ref(w, s, block=128):
     return w.float() * grid
 
 
-@pytest.mark.parametrize("shape", [(3840, 3840)])
+@pytest.mark.parametrize("shape", [(300, 200), (11520, 3840), (3840, 3840), (3840, 10240)])
 def test_dequant_block_fp8_matches_reference(shape):
     n, k = shape
     w = torch.randn(n, k).to(torch.float8_e4m3fn)
@@ -41,8 +41,8 @@ def test_detect_scale_orientation():
 def test_load_fp8_state_dict_dequantises_pairs(tmp_path):
     from safetensors.torch import save_file
 
-    w = torch.randn(256, 256).to(torch.float8_e4m3fn)
-    s = torch.rand(2, 2) + 0.5
+    w = torch.randn(256, 128).to(torch.float8_e4m3fn)
+    s = torch.rand(2, 1) + 0.5
     bias = torch.randn(256)
     save_file({"blk.weight": w, "blk.weight_scale_inv": s, "blk.bias": bias, "emb.weight": torch.randn(4, 4).bfloat16()},
               str(tmp_path / "diffusion_pytorch_model.safetensors"))

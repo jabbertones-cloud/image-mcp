@@ -158,7 +158,7 @@ def _dequant_block_fp8(weight, scale_inv, block: int = 128, dtype=None, transpos
         s = s.t()
     if tuple(s.shape) != (nb, kb):
         raise RuntimeError(f"scale grid {tuple(scale_inv.shape)} does not match weight {tuple(weight.shape)} (block {block}, transposed={transposed})")
-    s = s.repeat_interleave(block, dim=0)[:n].repeat_interleave(block, dim=1)[:k]
+    s = s.repeat_interleave(block, dim=0)[:n].repeat_interleave(block, dim=1)[:, :k]
     return (weight.to(torch.float32) * s).to(dtype or torch.bfloat16)
 
 
