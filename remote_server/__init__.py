@@ -8,4 +8,4 @@ client decodes locally with its own VAE. The server never decodes to RGB.
 See ``D:\\App Dev\\ImageTools_MCP\\docs\\REMOTE_GEN.md`` for the protocol
 and ``Dockerfile`` for the deploy stack (mirrors the QwenCharLoRA pattern).
 """
-__version__ = "0.1.0"
+__version__ = "1.1.0"

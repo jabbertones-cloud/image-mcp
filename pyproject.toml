@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "image-tools-mcp"
-version = "0.1.0"
+version = "1.1.0"
 description = "MCP server for image creation, editing, format conversion, and AI generation. MS Paint-style drawing primitives over a session canvas, plus broad format support (PNG/JPEG/WebP/HEIC/AVIF/SVG/RAW/...)."
 requires-python = ">=3.11"
 dependencies = [

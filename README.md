@@ -1,14 +1,15 @@
 <p align="center">
-  <img src="docs/images/hero_banner.png" alt="ImageTools MCP — 216 tools" width="100%">
+  <img src="docs/images/hero_banner.png" alt="ImageTools MCP — 242 tools" width="100%">
 </p>
 
 <p align="center">
-  <strong>A 216-tool MCP server for image editing, AI generation, segmentation, face swap, and more.</strong><br>
+  <strong>A 242-tool MCP server for image editing, AI generation and segmentation.</strong><br>
   Built with <a href="https://modelcontextprotocol.io">FastMCP</a> for Claude Code / Claude Desktop / any MCP client.
 </p>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/tools-216-blue" alt="216 tools">
+  <img src="https://img.shields.io/badge/tools-242-blue" alt="242 tools">
+  <img src="https://img.shields.io/badge/version-1.1.0-informational" alt="v1.1.0">
   <img src="https://img.shields.io/badge/python-3.12+-green" alt="Python 3.12+">
   <img src="https://img.shields.io/badge/license-MIT-lightgrey" alt="MIT License">
   <img src="https://img.shields.io/badge/CUDA-optional-orange" alt="CUDA optional">
@@ -18,7 +19,7 @@
 
 ## What is this?
 
-ImageTools MCP is a **Model Context Protocol server** that gives AI assistants (Claude, etc.) full image-editing capabilities — from basic drawing to Photoshop-grade adjustments, AI-powered generation, face swapping, and everything in between. All 216 tools work over an in-memory canvas with a Photoshop-style layer stack, undo/redo history, and non-destructive editing.
+ImageTools MCP is a **Model Context Protocol server** that gives AI assistants (Claude, etc.) full image-editing capabilities — from basic drawing to Photoshop-grade adjustments, AI-powered generation and editing, segmentation, and everything in between. All 242 tools work over an in-memory canvas with a Photoshop-style layer stack, undo/redo history, and non-destructive editing.
 
 ### Showcase
 
@@ -56,7 +57,8 @@ ImageTools MCP is a **Model Context Protocol server** that gives AI assistants (
 ## Features
 
 ### Core Image Editing
-- **Canvas + Layers** — Photoshop-style layer stack with opacity, blend modes (14 modes), masks, offsets, undo/redo (32-deep)
+- **Canvas + Layers** — Photoshop-style layer stack with opacity, blend modes (14 modes), masks, offsets, undo/redo (32-deep, byte-budgeted across all open canvases)
+- **Perception tools** — downscaled previews that stay inside the model's context budget, a 1:1 `inspect_region` zoom, and a `canvases_overview` contact sheet of every open canvas
 - **Drawing** — pixel, line, rectangle, ellipse, polygon, arc, text (TTF), brush, eraser, flood fill, colour picker
 - **Transforms** — crop, resize, rotate, flip, copy/paste regions, auto-crop-to-content, smart-crop-to-aspect, letterbox
 - **Filters & Adjustments** — hue/saturation, levels, curves, colour balance, threshold, vibrance, channel mixer, gradient map, auto levels/contrast, equalize, unsharp mask, high-pass, white balance
@@ -95,11 +97,13 @@ ImageTools MCP is a **Model Context Protocol server** that gives AI assistants (
 - **Mask Overlay/Preview** — visualise masks with coloured overlays + bbox + labels
 
 ### AI Generation (optional, GPU recommended)
-- **Stable Diffusion** — txt2img, img2img, inpaint (SD1.5/SDXL/SD3/FLUX)
+- **LLaDA-Image** — inclusionAI's 6B unified text-to-image + instruction editing model (FP8, Turbo 4-step or Base 50-step); the best text rendering of the three generators; runs on a 24 GB card through two-phase GPU scheduling
 - **Qwen-Image-Edit** — instruction-driven image editing with Q4 GGUF quantization + Lightning 4-step LoRA
+- **Stable Diffusion** — txt2img, img2img, inpaint (SD1.5/SDXL/SD3/FLUX)
 - **ControlNet** — structural conditioning for both SD and Qwen (canny/depth/pose + preprocessors)
 - **LoRA Stacking** — load multiple LoRAs with adjustable weights
 - **GGUF Support** — quantized transformers for consumer GPUs (24 GB VRAM)
+- **Remote generation** — run Qwen-Image on a rented GPU pod and receive only a sealed latent; the local server decodes it (see [docs/REMOTE_GEN.md](docs/REMOTE_GEN.md))
 
 ### Utilities
 - **Watermark** — text or image, 9-position placement
@@ -152,9 +156,9 @@ pip install --index-url https://download.pytorch.org/whl/cu121 \
     "torch==2.5.1+cu121" "torchvision==0.20.1+cu121" --no-deps
 
 # 2. All extras
-pip install -e ".[seg,sam,qwen,sd,yolo,gguf,face]"
+pip install -e ".[seg,sam,qwen,sd,yolo,gguf,face,remote]"
 
-# 3. Pin known-good versions (critical for Qwen GGUF)
+# 3. Pin known-good versions (critical for Qwen GGUF and LLaDA FP8 on Windows)
 pip install --force-reinstall "safetensors<0.8" "transformers==4.57.1"
 
 # 4. Additional deps
@@ -170,7 +174,9 @@ claude mcp add -s user image-tools -- \
     /path/to/ImageTools_MCP/run_server.py
 ```
 
-Restart Claude Code. The server registers 216 tools as `mcp__image-tools__*`.
+Restart Claude Code. The server registers 242 tools as `mcp__image-tools__*`.
+
+The first start imports the whole AI stack before it answers `initialize` (~10 s from an NVMe venv, minutes from a cold spinning disk). If your MCP host enforces a startup timeout, raise it for this server — the child process stays resident afterwards, so the cost is paid once.
 
 ---
 
@@ -181,40 +187,79 @@ Restart Claude Code. The server registers 216 tools as `mcp__image-tools__*`.
 | `[seg]` | SAM 1, BiRefNet, CLIPSeg, YOLO segmentation, OpenCV | ~2 GB |
 | `[sam]` | Segment Anything 2.1 | ~1 GB |
 | `[sd]` | Stable Diffusion txt2img/img2img/inpaint + ControlNet | ~4 GB |
-| `[qwen]` | Qwen-Image-Edit + ControlNet + GGUF + bnb 4-bit | ~4 GB |
+| `[qwen]` | Qwen-Image-Edit + ControlNet + GGUF + bnb 4-bit; also covers LLaDA-Image | ~4 GB |
 | `[yolo]` | YOLOv8 instance segmentation | ~200 MB |
 | `[gguf]` | GGUF quantized model loading | ~100 MB |
-| `[face]` | Face swap (InsightFace + inswapper_128 + GFPGAN) | ~1.2 GB |
+| `[face]` | `face_*` tools | ~1.2 GB |
+| `[remote]` | Client side of remote generation (httpx, pynacl) | ~5 MB |
 | `[raw]` | Camera RAW format support | ~50 MB |
 
 ---
 
-## Tool Categories (216 total)
+## Tool Categories (242 total)
 
 | Category | Count | Highlights |
 |---|---|---|
-| Canvas lifecycle | 11 | new, open, save, close, duplicate, undo/redo, preview |
-| Drawing | 12 | pixel, line, rect, ellipse, polygon, arc, text, brush, eraser, flood fill, pick colour |
-| Transforms | 9 | crop, resize, rotate, flip, copy/paste, auto-crop, smart-crop, letterbox, pixelate |
-| Filters & Adjustments | 18 | hue/sat, levels, curves, colour balance, threshold, vibrance, channel mixer, gradient map, unsharp mask, high-pass, vignette, noise, bilateral, white balance |
-| Gradients | 1 | linear/radial/angular/reflected/diamond with multi-stop |
-| Layers | 20 | add/remove/duplicate/rename/reorder, visibility, opacity, blend mode (14), offset, masks, merge, flatten |
+| Canvas lifecycle | 13 | new, open, save, close, list, info, duplicate, undo/redo, preview, `inspect_region`, `canvases_overview`, screenshot |
+| Drawing | 11 | pixel, line, rect, ellipse, polygon, arc, text, brush, eraser, flood fill, pick colour |
+| Transforms & basic filters | 13 | crop, resize, rotate, flip, copy/paste/clear region, filter, adjust, invert, grayscale, posterize, border |
+| Layers & masks | 20 | add/remove/duplicate/rename/reorder, visibility, opacity, blend mode (14), offset, merge, flatten, layer masks |
 | Layer effects | 3 | drop shadow, outer glow, stroke |
+| Photoshop adjustments | 11 | hue/sat, levels, curves, colour balance, threshold, vibrance, channel mixer, gradient map, auto levels/contrast, equalize |
+| Gradients | 1 | linear/radial/angular/reflected/diamond with multi-stop |
 | Channels | 3 | extract, merge, split to layers |
 | Painting brushes | 5 | clone stamp, dodge, burn, blur, sharpen |
 | Patterns | 8 | define, fill, stamp, overlay, make seamless, library management |
 | Warping / distort | 5 | perspective, mesh (TPS), liquify, distort filters (7 modes), displacement map |
 | Blur effects | 5 | motion, radial (spin/zoom), lens (disc/hex), tilt-shift, box |
-| Segmentation | 41 | SAM 2, SAM 1, YOLO, BiRefNet, CLIPSeg + mask overlay/preview |
-| SD generation | 10 | status/load/unload, txt2img, img2img, inpaint, ControlNet |
-| Qwen-Image-Edit | 15 | status/load/unload, edit, LoRA stacking, ControlNet generate/inpaint |
-| Face swap | 7 | detect, transfer, restore, lifecycle |
-| Format conversion | 16 | convert, batch, resize, thumbnail, crop, rotate, flip, grayscale, mode, metadata, animation, ICO, PDF |
-| Utilities | 13 | watermark, QR, perceptual hash, compare/diff, histogram, colour replace, rounded corners, annotate, glitch |
-| Preprocessors | 2 | canny edges, depth-from-grayscale |
+| Photo extras | 12 | auto-crop, smart-crop, pixelate, palette, quantize, unsharp mask, high-pass, vignette, noise, bilateral, magic wand, blend |
+| Utilities | 13 | watermark, QR, perceptual hash, compare/diff, histogram, colour replace, rounded corners, letterbox, white balance, annotate, glitch |
+| Stateless file ops & conversion | 21 | info, convert, batch, edit pipeline, resize, thumbnail, crop, rotate, flip, grayscale, mode, metadata, animation, ICO, PDF |
+| Segmentation | 40 | SAM 2, SAM 1, YOLO, BiRefNet, CLIPSeg, mask feather/expand/contract/refine, overlay/preview |
+| Stable Diffusion | 12 | status/load/unload, txt2img, img2img, inpaint, ControlNet, canny / depth preprocessors |
+| Qwen-Image-Edit | 14 | status/load/unload, edit, LoRA stacking, ControlNet generate/inpaint |
+| LLaDA-Image | 6 | status/load/unload/idle timeout, text-to-image, instruction editing |
 | GGUF helper | 1 | download quantized models from HuggingFace |
+| Face | 8 | `face_*` detect / transfer / restore / model listing + lifecycle |
+| Server config | 2 | get/set model directories and scratch paths |
+| Remote generation | 15 | pod status, txt2img / edit, LoRA cache, auto-abort watcher, generation queue |
 
 ---
+
+## LLaDA-Image Workflow
+
+LLaDA-Image (inclusionAI, released 2026-09-04) is a 6B DiT paired with a frozen 16B-A1B LLaDA2.0-Mini
+MoE text encoder. The FP8 checkpoints (`LLaDA-Image-Turbo-FP8`, `LLaDA-Image-FP8`) live as Diffusers
+directories under `server_config['llada_model_dir']` (default `B:\-AI-Stuff-\ComfyUI\models\diffusers`,
+change it with `set_config`).
+
+```
+llada_load(model="turbo")                                   # or "base"; idempotent
+llada_generate(prompt="a red fox in fresh snow", seed=42)   # 1024x1024, 4 steps / guidance 1.0 for turbo
+llada_edit(canvas_id, prompt="turn it into a watercolor painting")
+llada_status()                                              # VRAM, prompt cache, stats
+```
+
+How it fits in 24 GB: the FP8 text encoder is ~17 GB and the denoiser side ~10 GB, so they take turns.
+A new prompt loads the text encoder, encodes, frees it, and reloads the transformer + SigVQ; the
+embeddings are cached (32 prompts), so re-running a prompt with a new seed/size/steps skips all of
+that. Iterate seeds and sizes before you change the wording.
+
+What the loader has to do that stock Diffusers cannot (each of these was a real bring-up bug, see
+[CHANGELOG.md](CHANGELOG.md)):
+
+- The transformer is DeepSeek-style block FP8 (`weight` e4m3 + `weight_scale_inv` per 128×128 tile).
+  It is dequantised on load, streamed to the GPU tensor by tensor as float8, and run through Diffusers
+  layerwise casting with bf16 compute. Staging the bf16 copy on the GPU first OOMs a 24 GB card.
+- The export fuses `attention.to_qkv` and `feed_forward.w13`; the model class keeps them separate, so
+  they are split before assign-loading.
+- The text encoder's FP8 MoE experts use `torch._scaled_mm` with per-row scales (Hopper only) and
+  `index_select` on float8 activations (torch ≥ 2.6). On Ada with torch 2.5.1 the experts run the same
+  maths on bf16 activations.
+- Diffusers drops the scheduler key `use_uniform_sigmas` the pipeline reads; it is re-registered.
+
+Measured on an RTX 4090 from an NVMe venv: load 19.5 s, fresh-prompt generate 36.5 s, edit 35.4 s,
+peak 18.3 GB in the text-encoder phase, repeated prompt in seconds.
 
 ## Qwen-Image-Edit GGUF Workflow
 
@@ -233,6 +278,9 @@ qwen_edit_image(canvas_id="photo",
                 steps=4, true_cfg_scale=1.0)
 ```
 
+Omit `model=` on the inference calls: the cached pipeline is used. Passing the literal default forces a
+re-download of the bf16 base.
+
 **Pinned dependency matrix** (critical — newer versions break on Windows):
 - `transformers==4.57.1` (5.x segfaults loading checkpoint shards)
 - `safetensors<0.8` (0.8rc0 access-violates in `torch.storage`)
@@ -240,16 +288,28 @@ qwen_edit_image(canvas_id="photo",
 - `torch==2.5.1+cu121` (newer CPU-only torch breaks CUDA inference)
 - `bitsandbytes>=0.43` (4-bit text encoder to fit in 24 GB VRAM)
 
+## Stable Diffusion notes
+
+- The SD 1.x CLIP safety checker is never loaded: it replaces images it dislikes with a solid black frame
+  (it fired on a plain lighthouse img2img).
+- The inpaint default is `Lykon/dreamshaper-8-inpainting` (safetensors); `runwayml/stable-diffusion-inpainting`
+  ships pickled `.bin` weights that torch 2.5.1 refuses.
+- Inpaint keeps the source size instead of the pipeline's 512×512 default, so the mask lines up.
+- SD 1.5 below 512 px produces mush; that is the model, not a bug.
+
 ---
 
 ## Architecture
 
 ```
-run_server.py              # Entry point — prewarms AI imports in background
+run_server.py              # Entry point — imports the AI stack on the main thread, then starts FastMCP
+deploy.py                  # dev -> live copy (shutil, hash-verified)
 server/
-  image_tools_server.py    # @mcp.tool() surface — 216 tools
-  canvas.py                # In-memory canvas store + layer stack
-  layers.py                # Layer compositing (14 blend modes)
+  image_tools_server.py    # @mcp.tool() surface — 242 tools
+  prewarm.py               # One synchronous import of diffusers/transformers/peft/scipy (see Notes)
+  server_config.py         # Overridable model/scratch paths (get_config / set_config)
+  canvas.py                # In-memory canvas store, layer stack, store-wide undo budget
+  layers.py                # Layer compositing (14 blend modes), region compositing
   drawing.py               # Pixel-level drawing primitives
   transforms.py            # Crop, resize, rotate, flip, auto-crop, pixelate
   adjustments.py           # Hue/sat, levels, curves, unsharp, vignette, noise...
@@ -264,18 +324,25 @@ server/
   palette.py               # Colour extraction + quantization
   utilities.py             # Watermark, QR, hash, compare, histogram, annotate, glitch...
   preprocessors.py         # Canny edges, depth-from-grayscale
-  face_swap.py             # InsightFace + inswapper_128 + GFPGAN
+  llada.py                 # LLaDA-Image: FP8 loader, two-phase VRAM scheduling, prompt cache
+  llada_vendor/            # inclusionAI model + pipeline code (Apache-2.0, import paths only)
   qwen.py                  # Qwen-Image-Edit + GGUF + LoRA + ControlNet
   sd.py                    # Stable Diffusion + ControlNet
   sam.py / sam1.py         # SAM 2 / SAM 1
   yolo_seg.py              # YOLOv8 segmentation
   birefnet.py / clipseg.py # Background removal / text-prompted seg
+  face_swap.py             # face_* tools
+  remote_gen.py            # Client for the remote_server pod (sealed latents, local VAE decode)
+  remote_session.py        # Auto-abort watcher + FIFO generation queue
   gguf_io.py               # GGUF detection + download + quantization config
   io_formats.py            # Format loading/saving
   conversions.py           # Batch convert, animation, ICO, PDF
   stateless.py             # Stateless image ops dispatcher
   psd_io.py                # PSD layered read/write
   colors.py                # CSS/hex/tuple colour parser
+remote_server/             # FastAPI app for the GPU pod (docs/REMOTE_GEN.md)
+tools/                     # smoke_stdio.py (real-stdio smoke of the AI paths), sd_direct_check.py
+tests/                     # pytest, no GPU or weights needed
 ```
 
 ---
@@ -291,10 +358,27 @@ Colour args accept:
 
 ## Notes
 
-- All drawing/transform tools snapshot before mutating — every step is undoable (32-deep)
-- The server uses a **two-phase prewarm**: lightweight imports (torch/transformers/diffusers) on the main thread, heavy pipeline classes in a background thread — so MCP `initialize` responds in ~5s even though the full AI stack takes ~60s
-- AI model lifecycle follows a consistent pattern: `*_status` / `*_load` / `*_unload` / `*_set_idle_timeout` with a 1-hour idle sweeper that auto-frees GPU memory
-- GGUF quantized models use diffusers' built-in loader — no ComfyUI-GGUF node needed (the tensor naming already matches diffusers conventions)
+- All drawing/transform tools snapshot before mutating — every step is undoable (32-deep). Undo history is capped by bytes across all open canvases (`IMAGETOOLS_UNDO_MAX_MB`, default 512); the oldest snapshot store-wide is evicted first and every canvas keeps at least one step.
+- **The AI stack is imported once, synchronously, on the main thread before FastMCP starts.** Two concurrent lazy imports (a tool call on the event loop and a background prewarm thread) deadlock on module locks and freeze every later request, and scipy's native extensions hang when first imported from a non-main thread on Windows. Every AI module waits for the prewarm before its own imports. `IMAGETOOLS_PREWARM_BACKGROUND=1` restores the thread on non-Windows hosts.
+- AI model lifecycle follows a consistent pattern: `*_status` / `*_load` / `*_unload` / `*_set_idle_timeout` with a 1-hour idle sweeper that auto-frees GPU memory. Loading one backend never evicts another; unload SD/Qwen before LLaDA if VRAM is tight.
+- GGUF quantized models use diffusers' built-in loader — no ComfyUI-GGUF node needed (the tensor naming already matches diffusers conventions). Never call a whole-pipeline `.to()` or `enable_model_cpu_offload()` with a GGUF transformer loaded; the loaders place components individually.
+- Canvases live in memory only. Save anything you care about before the server restarts.
+
+## Testing & Deploy
+
+```bash
+# offline unit tests (no GPU, no weights)
+.venv\Scripts\python -m pytest tests -q
+
+# real-stdio smoke of the AI paths (needs the GPU + weights)
+.venv\Scripts\python tools\smoke_stdio.py status sd llada
+
+# copy code, tools, tests and docs to the live folder (edit LIVE in deploy.py first)
+python deploy.py --dry-run
+python deploy.py
+```
+
+`tests/test_sam.py::test_status_unavailable_returns_friendly_message` fails on a box where SAM is installed; it tests the message shown when it is not.
 
 ---
 
@@ -333,11 +417,15 @@ ImageTools MCP builds on these excellent open-source projects and models:
 | [rawpy](https://github.com/letmaik/rawpy) | MIT | Maik Riechert |
 | [pillow-heif](https://github.com/bigcat88/pillow_heif) | BSD-3-Clause | Alexander Piskun |
 | [einops](https://github.com/arogozhnikov/einops) | MIT | Alex Rogozhnikov |
+| [FastAPI](https://github.com/fastapi/fastapi) / [uvicorn](https://github.com/encode/uvicorn) | MIT / BSD-3-Clause | Sebastián Ramírez / Encode |
+| [httpx](https://github.com/encode/httpx) | BSD-3-Clause | Encode |
+| [PyNaCl](https://github.com/pyca/pynacl) | Apache 2.0 | PyCA |
 
 ### Model Weights
 
 | Model | License | Author | Used by |
 |---|---|---|---|
+| [LLaDA-Image / -Turbo (FP8)](https://huggingface.co/inclusionAI/LLaDA-Image-Turbo-FP8) | Apache 2.0 | inclusionAI (Ant Group) | `llada_*` tools; model + pipeline code vendored in `server/llada_vendor/` |
 | [Qwen-Image-Edit-2511](https://huggingface.co/Qwen/Qwen-Image-Edit-2511) | Apache 2.0 | Alibaba / Qwen | `qwen_*` tools |
 | [Qwen-Image-Edit-2511-GGUF](https://huggingface.co/unsloth/Qwen-Image-Edit-2511-GGUF) | Apache 2.0 | Unsloth (quantized) | Q4/Q3 GGUF |
 | [Qwen-Image-Edit-2511-Lightning](https://huggingface.co/lightx2v/Qwen-Image-Edit-2511-Lightning) | Apache 2.0 | LightX2V | Lightning LoRA |
@@ -366,6 +454,7 @@ ImageTools MCP builds on these excellent open-source projects and models:
 | **SDXL-Turbo** (SAI Non-Commercial) | Free for non-commercial use; commercial use free under $1M annual revenue; enterprise license above | Only applies if you use `sd_load(model="stabilityai/sdxl-turbo")`. Other SD models (SD 1.5, DreamShaper, FLUX) have different licenses. |
 | **SD 1.5 / DreamShaper / ControlNets** (OpenRAIL-M) | Allows commercial use but includes behavioural restrictions — must pass restrictions downstream | Standard for SD-ecosystem models. Permissive in practice for most uses. |
 | **CairoSVG** (LGPL-3.0) | Weak copyleft — must allow relinking but does NOT require open-sourcing your code when used as a pip dependency | Only loaded if you open SVG files. Practically zero impact for Python projects. |
+| **LLaDA-Image vendored code** (Apache 2.0) | Permissive; notice kept in `server/llada_vendor/LICENSE-LLaDA-Image.md` | Safe for commercial use. |
 | **GFPGAN** (Apache 2.0) | Permissive | Safe for commercial use. |
 | **Everything else** | Apache 2.0 / MIT / BSD | Fully permissive. |
 
