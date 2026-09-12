@@ -70,6 +70,7 @@ def test_watcher_trips_on_consecutive_failures():
     sess.queue.start()
     sess.watcher = AutoAbortWatcher(sess, WatcherConfig(poll_interval_s=0.02))
     sess.watcher._max_consecutive_failures = 3
+    sess.watcher._ever_reached = True  # the unreachable trip is gated on prior contact
 
     with patch("server.remote_gen.remote_server_status",
                side_effect=RuntimeError("connection refused")):

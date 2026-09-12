@@ -151,6 +151,12 @@ def test_txt2img_with_stub_pipeline_returns_sealed_latent(provisioned, monkeypat
     from remote_server.latent_blob import unpack_latent_blob
 
     class StubPipeline:
+        def apply_loras(self, loras, weights):
+            return []
+
+        def clear_loras(self):
+            pass
+
         def generate(self, payload, ws, mode):
             lat = torch.zeros(1, 16, 64, 64, dtype=torch.bfloat16)
             return lat, {

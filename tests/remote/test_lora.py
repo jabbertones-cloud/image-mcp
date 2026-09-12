@@ -265,8 +265,9 @@ def test_lora_cache_hit_via_bytes_then_by_sha_alone(provisioned):
     # stub received both applies, the second with weight=1.0
     assert len(stub.applied_calls) == 2
     assert stub.applied_calls[1] == [(lora_sha, 1.0)]
-    # clear was called both times — once per request
-    assert stub.cleared_count == 2
+    # the happy path reconciles the LoRA set in place (a queued batch sharing
+    # one LoRA must not reload it per job); clear_loras only runs when apply fails
+    assert stub.cleared_count == 0
 
 
 def test_lora_list_endpoint_lists_cached_entries(provisioned):
