@@ -22,7 +22,7 @@ from pathlib import Path
 SRC = Path(__file__).resolve().parent
 LIVE = Path(r"B:\-AI-Stuff-\-=MCP-Servers=-\ImageTools_MCP")
 
-FILES = ["run_server.py", "pyproject.toml", "README.md", "LICENSE", "deploy.py", "Dockerfile"]
+FILES = ["run_server.py", "pyproject.toml", "README.md", "CHANGELOG.md", "LICENSE", "deploy.py", "Dockerfile"]
 DIRS = ["server", "remote_server", "tools", "tests", "scripts", "docs"]
 IGNORE = shutil.ignore_patterns("__pycache__", "*.pyc", ".pytest_cache", "*.egg-info")
 
