@@ -8,7 +8,7 @@ version = "1.1.0"
 description = "MCP server for image creation, editing, format conversion, and AI generation. MS Paint-style drawing primitives over a session canvas, plus broad format support (PNG/JPEG/WebP/HEIC/AVIF/SVG/RAW/...)."
 requires-python = ">=3.11"
 dependencies = [
-    "mcp>=1.2.0",
+    "mcp>=1.2.0,<2.0",
     "Pillow>=10.2.0",
     "pillow-heif>=0.16.0",
     "cairosvg>=2.7.0",

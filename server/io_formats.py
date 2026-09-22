@@ -18,6 +18,8 @@ from typing import Any
 
 from PIL import Image, ExifTags
 
+from .path_safety import assert_within_root, atomic_write
+
 # Register HEIF/AVIF plugin. Safe to import multiple times.
 try:
     import pillow_heif
@@ -93,6 +95,7 @@ def load_image(path: str, *, svg_width: int | None = None,
     SVG and camera RAW are dispatched to specialized readers; everything else
     goes through ``PIL.Image.open`` which auto-detects via magic bytes.
     """
+    path = str(assert_within_root(path))
     if not Path(path).is_file():
         raise FileNotFoundError(f"no such file: {path}")
     ext = _ext(path)
@@ -149,6 +152,7 @@ def save_image(img: Image.Image, path: str, *, format: str | None = None,
 
     Returns a small summary dict suitable as a tool result.
     """
+    path = str(assert_within_root(path, allow_missing=True))
     Path(path).parent.mkdir(parents=True, exist_ok=True)
     ext = _ext(path)
 
@@ -180,7 +184,7 @@ def save_image(img: Image.Image, path: str, *, format: str | None = None,
             raise RuntimeError(f"pillow-heif unavailable: {_HEIF_ERR}")
         save_kwargs["quality"] = quality if quality is not None else 80
 
-    out.save(path, **save_kwargs)
+    atomic_write(path, lambda tmp: out.save(tmp, **save_kwargs))
     return {
         "path": str(Path(path).resolve()),
         "format": fmt,

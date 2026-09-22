@@ -23,6 +23,7 @@ import numpy as np
 from PIL import Image
 
 from .layers import Layer
+from .path_safety import assert_within_root, atomic_write
 
 
 # Mapping our blend_mode strings to the psd-tools BlendMode enum value.
@@ -142,6 +143,7 @@ def save_psd(layers: list[Layer], canvas_size: tuple[int, int],
     from psd_tools import PSDImage
     from psd_tools.constants import BlendMode
 
+    path = str(assert_within_root(path, allow_missing=True))
     Path(path).parent.mkdir(parents=True, exist_ok=True)
 
     psd = PSDImage.new(mode="RGBA", size=canvas_size)
@@ -163,7 +165,7 @@ def save_psd(layers: list[Layer], canvas_size: tuple[int, int],
         # Visibility isn't a create_pixel_layer kwarg; set it on the layer.
         psd[-1].visible = bool(layer.visible)
 
-    psd.save(path)
+    atomic_write(path, lambda tmp: psd.save(tmp))
     return {
         "path": str(Path(path).resolve()),
         "format": "PSD",

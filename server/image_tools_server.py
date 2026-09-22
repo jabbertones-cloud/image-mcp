@@ -34,9 +34,21 @@ from . import (
 )
 from .canvas import store
 from .colors import parse_color
+from .tool_catalog import ToolCatalog, group_for
 
 log = logging.getLogger("image-tools-mcp")
 mcp = FastMCP("image-tools-mcp")
+
+
+_tool_catalog = ToolCatalog()
+_original_list_tools = mcp.list_tools
+
+async def _progressive_list_tools():
+    tools = await _original_list_tools()
+    allowed = _tool_catalog.exposed(t.name for t in tools)
+    return [t for t in tools if t.name in allowed]
+
+mcp.list_tools = _progressive_list_tools
 
 
 # ============================================================ helpers
@@ -3862,6 +3874,37 @@ def main() -> None:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
     mcp.run()
 
+
+
+@mcp.tool()
+def discover_tools(query: str = "", limit: int = 20) -> dict:
+    """Search the full ImageTools catalog without exposing every schema."""
+    names = [t.name for t in mcp._tool_manager.list_tools()]
+    return {"tools": _tool_catalog.search(names, query, limit), "active_groups": sorted(_tool_catalog.active)}
+
+
+@mcp.tool()
+def list_tool_groups() -> dict:
+    """List progressive tool groups and whether each is active."""
+    names = [t.name for t in mcp._tool_manager.list_tools()]
+    groups = sorted({group_for(n) for n in names if n not in {"discover_tools","list_tool_groups","activate_tool_group","deactivate_tool_group"}})
+    return {"groups": [{"name": g, "active": g in _tool_catalog.active} for g in groups]}
+
+
+@mcp.tool()
+def activate_tool_group(group: str) -> dict:
+    """Expose one named tool group in subsequent tools/list responses."""
+    names = [t.name for t in mcp._tool_manager.list_tools()]
+    groups = {group_for(n) for n in names}
+    changed = _tool_catalog.activate(group, groups)
+    return {"ok": True, "group": group, "changed": changed, "active_groups": sorted(_tool_catalog.active)}
+
+
+@mcp.tool()
+def deactivate_tool_group(group: str) -> dict:
+    """Hide one named tool group from subsequent tools/list responses."""
+    changed = _tool_catalog.deactivate(group)
+    return {"ok": True, "group": group, "changed": changed, "active_groups": sorted(_tool_catalog.active)}
 
 if __name__ == "__main__":
     main()
