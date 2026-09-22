@@ -14,7 +14,7 @@ from __future__ import annotations
 import io
 import os
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from PIL import Image, ExifTags
 
@@ -86,6 +86,24 @@ def resolve_input_path(path: str) -> str:
 
 def resolve_output_path(path: str) -> str:
     return _assert_within_root(path, "IMAGETOOLS_OUTPUT_ROOT", must_exist=False)
+
+
+def atomic_write(path: str, writer: Callable[[str], None]) -> str:
+    """Write a file beside its destination and atomically replace on success."""
+    resolved = resolve_output_path(path)
+    target = Path(resolved)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    tmp = target.with_name(f".{target.name}.tmp")
+    try:
+        writer(str(tmp))
+        os.replace(tmp, target)
+    except Exception:
+        try:
+            tmp.unlink()
+        except FileNotFoundError:
+            pass
+        raise
+    return str(target)
 
 
 # Extensions that need special-case handling rather than Pillow's default
@@ -200,7 +218,6 @@ def save_image(img: Image.Image, path: str, *, format: str | None = None,
     Returns a small summary dict suitable as a tool result.
     """
     path = resolve_output_path(path)
-    Path(path).parent.mkdir(parents=True, exist_ok=True)
     ext = _ext(path)
 
     if ext in _SVG_EXTS:
@@ -231,17 +248,7 @@ def save_image(img: Image.Image, path: str, *, format: str | None = None,
             raise RuntimeError(f"pillow-heif unavailable: {_HEIF_ERR}")
         save_kwargs["quality"] = quality if quality is not None else 80
 
-    target = Path(path)
-    tmp = target.with_name(f".{target.name}.tmp")
-    try:
-        out.save(tmp, **save_kwargs)
-        os.replace(tmp, target)
-    except Exception:
-        try:
-            tmp.unlink()
-        except FileNotFoundError:
-            pass
-        raise
+    path = atomic_write(path, lambda tmp: out.save(tmp, **save_kwargs))
     return {
         "path": str(Path(path).resolve()),
         "format": fmt,

@@ -16,13 +16,13 @@ layer's alpha on save with a one-line note in the response.
 """
 from __future__ import annotations
 
-import os
 from pathlib import Path
 from typing import Any
 
 import numpy as np
 from PIL import Image
 
+from . import io_formats
 from .layers import Layer
 
 
@@ -164,17 +164,7 @@ def save_psd(layers: list[Layer], canvas_size: tuple[int, int],
         # Visibility isn't a create_pixel_layer kwarg; set it on the layer.
         psd[-1].visible = bool(layer.visible)
 
-    target = Path(path)
-    tmp = target.with_name(f".{target.name}.tmp")
-    try:
-        psd.save(tmp)
-        os.replace(tmp, target)
-    except Exception:
-        try:
-            tmp.unlink()
-        except FileNotFoundError:
-            pass
-        raise
+    path = io_formats.atomic_write(path, psd.save)
     return {
         "path": str(Path(path).resolve()),
         "format": "PSD",

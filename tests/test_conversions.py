@@ -192,3 +192,48 @@ def test_copy_metadata_fails_without_exif(tmp_path: Path):
     with pytest.raises(ValueError):
         conversions.copy_metadata(str(no_exif), str(clean),
                                   str(tmp_path / "out.jpg"))
+
+
+# ---- hardened filesystem contract -------------------------------------------
+
+def test_animation_output_root_rejects_escape(tmp_path: Path, monkeypatch):
+    root = tmp_path / "allowed"
+    root.mkdir()
+    frame = _frame(tmp_path, "frame.png", (255, 0, 0))
+    monkeypatch.setenv("IMAGETOOLS_OUTPUT_ROOT", str(root))
+    with pytest.raises(io_formats.PathRootViolation):
+        conversions.build_animation([str(frame)], str(tmp_path / "escape.gif"))
+
+
+def test_split_ico_input_root_rejects_symlink_escape(tmp_path: Path, monkeypatch):
+    root = tmp_path / "allowed"
+    root.mkdir()
+    src = _frame(tmp_path, "source.png", (10, 20, 30), size=(64, 64))
+    ico = tmp_path / "outside.ico"
+    conversions.build_ico([str(src)], str(ico), sizes=[16, 32])
+    link = root / "linked.ico"
+    link.symlink_to(ico)
+    monkeypatch.setenv("IMAGETOOLS_INPUT_ROOT", str(root))
+    with pytest.raises(io_formats.PathRootViolation):
+        conversions.split_ico(str(link), str(root / "out"))
+
+
+def test_batch_convert_isolates_bad_file(tmp_path: Path):
+    from server import image_tools_server as srv
+
+    src = tmp_path / "src"
+    dst = tmp_path / "dst"
+    src.mkdir()
+    _frame(src, "good.png", (0, 255, 0))
+    (src / "bad.png").write_bytes(b"not an image")
+
+    result = srv.batch_convert(str(src), str(dst), "jpg")
+
+    assert result["converted"] == 1
+    assert result["failed"] == 1
+    assert len(result["results"]) == 2
+    assert any(item["ok"] for item in result["results"])
+    failed = [item for item in result["results"] if not item["ok"]]
+    assert len(failed) == 1
+    assert "bad.png" in failed[0]["src"]
+    assert (dst / "good.jpg").exists()

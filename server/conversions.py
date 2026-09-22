@@ -47,7 +47,7 @@ def extract_frames(src_path: str, dst_dir: str, *,
     comes from ``format``.
     """
     img = io_formats.load_image(src_path)
-    dst = Path(dst_dir)
+    dst = Path(io_formats.resolve_output_path(dst_dir))
     dst.mkdir(parents=True, exist_ok=True)
     fmt = format.lower().lstrip(".")
     n_frames = getattr(img, "n_frames", 1)
@@ -95,7 +95,7 @@ def build_animation(frame_paths: Sequence[str], dst_path: str, *,
         normalized.append(f)
 
     duration_ms = int(round(1000.0 / max(0.1, float(fps))))
-    Path(dst_path).parent.mkdir(parents=True, exist_ok=True)
+    dst_path = io_formats.resolve_output_path(dst_path)
 
     save_kwargs: dict[str, Any] = {
         "save_all": True,
@@ -121,7 +121,10 @@ def build_animation(frame_paths: Sequence[str], dst_path: str, *,
         fmt = "PNG"
         save_kwargs.pop("optimize", None)
 
-    normalized[0].save(dst_path, format=fmt, **save_kwargs)
+    dst_path = io_formats.atomic_write(
+        dst_path,
+        lambda tmp: normalized[0].save(tmp, format=fmt, **save_kwargs),
+    )
     return {
         "path": str(Path(dst_path).resolve()),
         "format": fmt,
@@ -152,7 +155,7 @@ def build_ico(src_paths: Sequence[str], dst_path: str, *,
     if not src_paths:
         raise ValueError("build_ico: src_paths is empty")
 
-    Path(dst_path).parent.mkdir(parents=True, exist_ok=True)
+    dst_path = io_formats.resolve_output_path(dst_path)
 
     if len(src_paths) == 1:
         # Single image → multiple square sizes via Pillow's ICO encoder.
@@ -160,7 +163,9 @@ def build_ico(src_paths: Sequence[str], dst_path: str, *,
         size_pairs: list[tuple[int, int]] = (
             [(s, s) for s in sizes] if sizes else _ICO_DEFAULT_SIZES
         )
-        base.save(dst_path, format="ICO", sizes=size_pairs)
+        dst_path = io_formats.atomic_write(
+            dst_path, lambda tmp: base.save(tmp, format="ICO", sizes=size_pairs)
+        )
         return {
             "path": str(Path(dst_path).resolve()),
             "format": "ICO",
@@ -172,7 +177,10 @@ def build_ico(src_paths: Sequence[str], dst_path: str, *,
     # dimensions. Pillow's ICO writer keys off each image's size.
     images = [io_formats.load_image(p).convert("RGBA") for p in src_paths]
     base = images[0]
-    base.save(dst_path, format="ICO", append_images=images[1:])
+    dst_path = io_formats.atomic_write(
+        dst_path,
+        lambda tmp: base.save(tmp, format="ICO", append_images=images[1:]),
+    )
     return {
         "path": str(Path(dst_path).resolve()),
         "format": "ICO",
@@ -188,10 +196,11 @@ def split_ico(src_path: str, dst_dir: str, *,
     Files are named ``icon_{w}x{h}.{ext}``. Pillow's ICO plugin exposes each
     embedded size via ``.ico.frame(i)`` or ``.size`` after ``.seek``.
     """
+    src_path = io_formats.resolve_input_path(src_path)
     ico = Image.open(src_path)
     if ico.format != "ICO":
         raise ValueError(f"{src_path} is not an ICO file (detected {ico.format})")
-    dst = Path(dst_dir)
+    dst = Path(io_formats.resolve_output_path(dst_dir))
     dst.mkdir(parents=True, exist_ok=True)
     ext = format.lower().lstrip(".")
 
@@ -219,7 +228,8 @@ def pdf_to_images(src_path: str, dst_dir: str, *,
     """
     import pypdfium2 as pdfium  # type: ignore
 
-    dst = Path(dst_dir)
+    src_path = io_formats.resolve_input_path(src_path)
+    dst = Path(io_formats.resolve_output_path(dst_dir))
     dst.mkdir(parents=True, exist_ok=True)
     ext = format.lower().lstrip(".")
 
@@ -271,7 +281,7 @@ def images_to_pdf(src_paths: Sequence[str], dst_path: str, *,
     """
     if not src_paths:
         raise ValueError("images_to_pdf: src_paths is empty")
-    Path(dst_path).parent.mkdir(parents=True, exist_ok=True)
+    dst_path = io_formats.resolve_output_path(dst_path)
 
     pages = []
     for p in src_paths:
@@ -284,8 +294,13 @@ def images_to_pdf(src_paths: Sequence[str], dst_path: str, *,
             img = img.convert("RGB")
         pages.append(img)
 
-    pages[0].save(dst_path, format="PDF", save_all=True,
-                  append_images=pages[1:], resolution=300.0, quality=quality)
+    dst_path = io_formats.atomic_write(
+        dst_path,
+        lambda tmp: pages[0].save(
+            tmp, format="PDF", save_all=True, append_images=pages[1:],
+            resolution=300.0, quality=quality,
+        ),
+    )
     return {
         "path": str(Path(dst_path).resolve()),
         "pages": len(pages),
@@ -361,7 +376,7 @@ def copy_metadata(meta_src: str, image_src: str, dst_path: str, *,
     if not exif:
         raise ValueError(f"no EXIF data in {meta_src}")
 
-    Path(dst_path).parent.mkdir(parents=True, exist_ok=True)
+    dst_path = io_formats.resolve_output_path(dst_path)
     fmt = io_formats._PIL_FORMAT_BY_EXT.get(
         Path(dst_path).suffix.lower().lstrip("."), None
     )
@@ -372,7 +387,11 @@ def copy_metadata(meta_src: str, image_src: str, dst_path: str, *,
     coerced = io_formats._coerce_for_format(image, fmt or "JPEG")
     if fmt:
         save_kwargs["format"] = fmt
-    coerced.save(dst_path, **save_kwargs)
+    if "format" not in save_kwargs:
+        save_kwargs["format"] = fmt or "JPEG"
+    dst_path = io_formats.atomic_write(
+        dst_path, lambda tmp: coerced.save(tmp, **save_kwargs)
+    )
     return {
         "path": str(Path(dst_path).resolve()),
         "format": fmt or "JPEG",

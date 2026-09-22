@@ -871,8 +871,8 @@ def batch_convert(src_dir: str, dst_dir: str, target_format: str, *,
     Skips non-image files. Returns counts and per-file results so the caller
     can see what failed.
     """
-    src = Path(src_dir)
-    dst = Path(dst_dir)
+    src = Path(io_formats.resolve_input_path(src_dir))
+    dst = Path(io_formats.resolve_output_path(dst_dir))
     if not src.is_dir():
         raise ValueError(f"src_dir is not a directory: {src_dir}")
     dst.mkdir(parents=True, exist_ok=True)
