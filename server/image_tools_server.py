@@ -163,7 +163,8 @@ def open_canvas(path: str, *, canvas_id: str | None = None,
     to control size) + camera RAW (CR2/NEF/ARW/DNG/..., requires `[raw]` extra) +
     PSD (layered, via psd-tools — preserves layer stack with opacity/blend modes).
     """
-    resolved = str(Path(path).resolve())
+    path = io_formats.resolve_input_path(path)
+    resolved = path
     if path.lower().endswith(".psd"):
         from .psd_io import load_psd
 
@@ -185,6 +186,7 @@ def save_canvas(canvas_id: str, path: str, *, format: str | None = None,
     visibility, offsets). All other formats flatten visible layers into a
     composite first. JPEG additionally flattens alpha onto white.
     """
+    path = io_formats.resolve_output_path(path)
     if path.lower().endswith(".psd"):
         from .psd_io import save_psd
 

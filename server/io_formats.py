@@ -39,6 +39,55 @@ def _ext(path: str | os.PathLike[str]) -> str:
     return Path(path).suffix.lower().lstrip(".")
 
 
+class PathRootViolation(ValueError):
+    """Raised when a configured image path escapes its allowed filesystem root."""
+
+
+def _configured_root(env_name: str) -> Path | None:
+    value = os.environ.get(env_name, "").strip()
+    if not value:
+        return None
+    root = Path(value).expanduser()
+    try:
+        return root.resolve(strict=True)
+    except OSError as exc:
+        raise PathRootViolation(
+            f"{env_name} does not exist or cannot be resolved: {root}"
+        ) from exc
+
+
+def _assert_within_root(path: str, env_name: str, *, must_exist: bool) -> str:
+    """Resolve a path and enforce the configured root, following symlinks.
+
+    This is the Python adaptation of image-gen-mcp's proven input-root
+    contract: existing paths are checked by real path; future output paths
+    are checked after resolving all existing parent components.
+    """
+    candidate = Path(path).expanduser()
+    root = _configured_root(env_name)
+    try:
+        resolved = candidate.resolve(strict=must_exist)
+    except OSError:
+        resolved = candidate.resolve(strict=False)
+
+    if root is not None:
+        try:
+            resolved.relative_to(root)
+        except ValueError as exc:
+            raise PathRootViolation(
+                f"path resolves outside {env_name}: {path}"
+            ) from exc
+    return str(resolved)
+
+
+def resolve_input_path(path: str) -> str:
+    return _assert_within_root(path, "IMAGETOOLS_INPUT_ROOT", must_exist=True)
+
+
+def resolve_output_path(path: str) -> str:
+    return _assert_within_root(path, "IMAGETOOLS_OUTPUT_ROOT", must_exist=False)
+
+
 # Extensions that need special-case handling rather than Pillow's default
 # ``Image.open`` path.
 _RAW_EXTS = {
@@ -93,6 +142,7 @@ def load_image(path: str, *, svg_width: int | None = None,
     SVG and camera RAW are dispatched to specialized readers; everything else
     goes through ``PIL.Image.open`` which auto-detects via magic bytes.
     """
+    path = resolve_input_path(path)
     if not Path(path).is_file():
         raise FileNotFoundError(f"no such file: {path}")
     ext = _ext(path)
@@ -149,6 +199,7 @@ def save_image(img: Image.Image, path: str, *, format: str | None = None,
 
     Returns a small summary dict suitable as a tool result.
     """
+    path = resolve_output_path(path)
     Path(path).parent.mkdir(parents=True, exist_ok=True)
     ext = _ext(path)
 
@@ -180,7 +231,17 @@ def save_image(img: Image.Image, path: str, *, format: str | None = None,
             raise RuntimeError(f"pillow-heif unavailable: {_HEIF_ERR}")
         save_kwargs["quality"] = quality if quality is not None else 80
 
-    out.save(path, **save_kwargs)
+    target = Path(path)
+    tmp = target.with_name(f".{target.name}.tmp")
+    try:
+        out.save(tmp, **save_kwargs)
+        os.replace(tmp, target)
+    except Exception:
+        try:
+            tmp.unlink()
+        except FileNotFoundError:
+            pass
+        raise
     return {
         "path": str(Path(path).resolve()),
         "format": fmt,

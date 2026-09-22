@@ -56,3 +56,52 @@ def test_save_rejects_svg_and_raw(tmp_path: Path):
 def test_load_missing_file_raises(tmp_path: Path):
     with pytest.raises(FileNotFoundError):
         io_formats.load_image(str(tmp_path / "nope.png"))
+
+
+def test_input_root_allows_file_inside_root(tmp_path: Path, monkeypatch):
+    root = tmp_path / "root"
+    root.mkdir()
+    p = root / "inside.png"
+    Image.new("RGB", (2, 2), "red").save(p)
+    monkeypatch.setenv("IMAGETOOLS_INPUT_ROOT", str(root))
+    assert io_formats.load_image(str(p)).size == (2, 2)
+
+
+def test_input_root_rejects_traversal(tmp_path: Path, monkeypatch):
+    root = tmp_path / "root"
+    root.mkdir()
+    outside = tmp_path / "outside.png"
+    Image.new("RGB", (2, 2), "red").save(outside)
+    monkeypatch.setenv("IMAGETOOLS_INPUT_ROOT", str(root))
+    with pytest.raises(io_formats.PathRootViolation):
+        io_formats.load_image(str(root / ".." / "outside.png"))
+
+
+def test_input_root_rejects_symlink_escape(tmp_path: Path, monkeypatch):
+    root = tmp_path / "root"
+    root.mkdir()
+    outside = tmp_path / "outside.png"
+    Image.new("RGB", (2, 2), "red").save(outside)
+    link = root / "link.png"
+    link.symlink_to(outside)
+    monkeypatch.setenv("IMAGETOOLS_INPUT_ROOT", str(root))
+    with pytest.raises(io_formats.PathRootViolation):
+        io_formats.load_image(str(link))
+
+
+def test_output_root_rejects_escape(tmp_path: Path, monkeypatch):
+    root = tmp_path / "root"
+    root.mkdir()
+    monkeypatch.setenv("IMAGETOOLS_OUTPUT_ROOT", str(root))
+    with pytest.raises(io_formats.PathRootViolation):
+        io_formats.save_image(
+            Image.new("RGB", (2, 2), "red"),
+            str(tmp_path / "outside.png"),
+        )
+
+
+def test_save_is_atomic_and_leaves_no_temp_file(tmp_path: Path):
+    target = tmp_path / "atomic.png"
+    io_formats.save_image(Image.new("RGB", (2, 2), "red"), str(target))
+    assert target.exists()
+    assert not (tmp_path / ".atomic.png.tmp").exists()

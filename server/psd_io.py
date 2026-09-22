@@ -16,6 +16,7 @@ layer's alpha on save with a one-line note in the response.
 """
 from __future__ import annotations
 
+import os
 from pathlib import Path
 from typing import Any
 
@@ -163,7 +164,17 @@ def save_psd(layers: list[Layer], canvas_size: tuple[int, int],
         # Visibility isn't a create_pixel_layer kwarg; set it on the layer.
         psd[-1].visible = bool(layer.visible)
 
-    psd.save(path)
+    target = Path(path)
+    tmp = target.with_name(f".{target.name}.tmp")
+    try:
+        psd.save(tmp)
+        os.replace(tmp, target)
+    except Exception:
+        try:
+            tmp.unlink()
+        except FileNotFoundError:
+            pass
+        raise
     return {
         "path": str(Path(path).resolve()),
         "format": "PSD",
