@@ -19,6 +19,8 @@ from __future__ import annotations
 
 import io
 import logging
+import os
+import threading
 from pathlib import Path
 from typing import Any, Sequence
 
@@ -36,7 +38,110 @@ from .canvas import store
 from .colors import parse_color
 
 log = logging.getLogger("image-tools-mcp")
-mcp = FastMCP("image-tools-mcp")
+
+_PROGRESSIVE_DISABLED = {"0", "false", "no", "off"}
+_TOOL_GROUP_LOCK = threading.RLock()
+_ACTIVE_TOOL_GROUPS = {
+    item.strip().lower()
+    for item in os.environ.get("IMAGETOOLS_TOOL_GROUPS", "").split(",")
+    if item.strip()
+}
+_CORE_TOOLS = {
+    "new_canvas", "open_canvas", "save_canvas", "close_canvas",
+    "list_canvases", "get_canvas_info", "get_canvas_preview",
+    "inspect_region", "canvases_overview", "screenshot_canvas",
+    "duplicate_canvas", "undo", "redo",
+    "image_info", "convert_image", "batch_convert", "supported_formats",
+    "edit_image", "resize_image", "thumbnail_image", "crop_image",
+    "rotate_image", "flip_image", "grayscale_image", "list_ops",
+    "perceptual_hash", "compare_images", "diff_image", "histogram",
+    "extract_palette",
+    "search_tools", "list_tool_groups", "activate_tool_group",
+    "deactivate_tool_group",
+}
+
+
+def _progressive_tools_enabled() -> bool:
+    return os.environ.get("IMAGETOOLS_PROGRESSIVE_TOOLS", "1").strip().lower() not in _PROGRESSIVE_DISABLED
+
+
+def _tool_group(name: str) -> str:
+    if name in _CORE_TOOLS:
+        return "core"
+    if name.startswith(("sd_", "qwen_", "llada_")) or name == "download_gguf":
+        return "generation"
+    if name.startswith(("remote_",)):
+        return "remote"
+    if name.startswith(("face_",)):
+        return "face"
+    if name.startswith(("sam_", "sam1_", "yolo_", "birefnet_", "clipseg_")):
+        return "segmentation"
+    if "mask" in name or name in {"magic_wand"}:
+        return "masks"
+    if "layer" in name or name in {"merge_down", "flatten_canvas"}:
+        return "layers"
+    if name.startswith("draw_") or name in {
+        "eraser", "flood_fill", "pick_color", "clone_stamp", "dodge_brush",
+        "burn_brush", "blur_brush", "sharpen_brush", "annotate",
+    }:
+        return "drawing"
+    if name in {
+        "crop", "resize", "rotate", "flip", "copy_region", "paste_canvas",
+        "clear_region", "add_border", "warp_perspective", "warp_mesh",
+        "liquify", "distort", "displace_by_map", "auto_crop_to_content",
+        "smart_crop_to_aspect", "letterbox", "rounded_corners",
+    }:
+        return "transforms"
+    if name in {
+        "extract_frames", "build_animation", "build_ico", "split_ico",
+        "pdf_to_images", "images_to_pdf", "convert_mode", "strip_metadata",
+        "copy_metadata",
+    }:
+        return "conversion"
+    if name.startswith(("define_pattern", "fill_pattern", "pattern_")) or name in {
+        "list_patterns", "delete_pattern", "make_seamless",
+    }:
+        return "patterns"
+    if name in {
+        "hue_saturation", "levels", "curves", "color_balance", "threshold",
+        "vibrance", "channel_mixer", "gradient_map", "auto_levels",
+        "auto_contrast", "equalize", "gradient_fill", "extract_channel",
+        "merge_channels", "split_channels_to_layers", "white_balance",
+        "color_replace", "color_quantize", "adjust", "invert", "grayscale",
+        "posterize",
+    }:
+        return "adjustments"
+    if name in {
+        "motion_blur", "radial_blur", "lens_blur", "tilt_shift", "box_blur",
+        "apply_filter", "pixelate", "unsharp_mask", "high_pass", "add_vignette",
+        "add_noise", "bilateral_filter", "glitch_effect", "add_drop_shadow",
+        "add_outer_glow", "add_layer_stroke", "add_watermark", "make_qr_code",
+        "blend_canvases",
+    }:
+        return "effects"
+    return "advanced"
+
+
+class ProgressiveFastMCP(FastMCP):
+    """FastMCP with dcc-mcp-style progressive tool discovery.
+
+    The complete ToolManager remains intact, so hidden tools keep the exact
+    donor implementation and can be revealed without re-registration.
+    """
+
+    async def list_tools(self):
+        tools = await super().list_tools()
+        if not _progressive_tools_enabled():
+            return tools
+        with _TOOL_GROUP_LOCK:
+            active = set(_ACTIVE_TOOL_GROUPS)
+        return [
+            tool for tool in tools
+            if tool.name in _CORE_TOOLS or _tool_group(tool.name) in active
+        ]
+
+
+mcp = ProgressiveFastMCP("image-tools-mcp")
 
 
 # ============================================================ helpers
@@ -3856,6 +3961,84 @@ def remote_queue_clear() -> dict:
     from . import remote_session
     sess = remote_session.get_session()
     return {"cancelled": sess.queue.clear()}
+
+
+# ============================================================ tool discovery
+
+@mcp.tool()
+def list_tool_groups() -> dict:
+    """List progressive tool groups, active state, and registered tool counts."""
+    groups: dict[str, int] = {}
+    for tool in mcp._tool_manager.list_tools():
+        group = _tool_group(tool.name)
+        groups[group] = groups.get(group, 0) + 1
+    with _TOOL_GROUP_LOCK:
+        active = set(_ACTIVE_TOOL_GROUPS)
+    return {
+        "progressive": _progressive_tools_enabled(),
+        "groups": [
+            {"name": name, "tool_count": count, "active": name == "core" or name in active}
+            for name, count in sorted(groups.items())
+        ],
+        "registered_tools": sum(groups.values()),
+    }
+
+
+@mcp.tool()
+def search_tools(query: str, *, limit: int = 12) -> dict:
+    """Search all registered image tools, including currently hidden groups."""
+    terms = [term.lower() for term in query.split() if term.strip()]
+    if not terms:
+        return {"query": query, "results": []}
+    scored: list[tuple[int, str, str, str]] = []
+    for tool in mcp._tool_manager.list_tools():
+        if tool.name in {"search_tools", "list_tool_groups", "activate_tool_group", "deactivate_tool_group"}:
+            continue
+        name = tool.name.lower()
+        description = (tool.description or "").lower()
+        haystack = f"{name} {description}"
+        if not all(term in haystack for term in terms):
+            continue
+        score = sum(8 if term in name else 2 for term in terms)
+        if name == "_".join(terms):
+            score += 20
+        scored.append((score, tool.name, _tool_group(tool.name), tool.description or ""))
+    scored.sort(key=lambda item: (-item[0], item[1]))
+    cap = max(1, min(int(limit), 50))
+    return {
+        "query": query,
+        "results": [
+            {"name": name, "group": group, "description": description}
+            for _score, name, group, description in scored[:cap]
+        ],
+    }
+
+
+@mcp.tool()
+def activate_tool_group(group: str) -> dict:
+    """Expose a tool group in subsequent tools/list responses."""
+    group = group.strip().lower()
+    valid = {_tool_group(tool.name) for tool in mcp._tool_manager.list_tools()}
+    if group == "core":
+        return {"group": "core", "active": True, "changed": False}
+    if group not in valid:
+        raise ValueError(f"unknown tool group {group!r}; choose from {sorted(valid)}")
+    with _TOOL_GROUP_LOCK:
+        changed = group not in _ACTIVE_TOOL_GROUPS
+        _ACTIVE_TOOL_GROUPS.add(group)
+    return {"group": group, "active": True, "changed": changed}
+
+
+@mcp.tool()
+def deactivate_tool_group(group: str) -> dict:
+    """Hide a previously activated tool group from tools/list."""
+    group = group.strip().lower()
+    if group == "core":
+        raise ValueError("core tool group cannot be deactivated")
+    with _TOOL_GROUP_LOCK:
+        changed = group in _ACTIVE_TOOL_GROUPS
+        _ACTIVE_TOOL_GROUPS.discard(group)
+    return {"group": group, "active": False, "changed": changed}
 
 
 # ============================================================ entry
