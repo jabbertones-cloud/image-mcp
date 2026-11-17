@@ -17,6 +17,8 @@
 
 ---
 
+**Support:** [Setup and troubleshooting](SUPPORT.md) | [Report a public bug](https://github.com/jabbertones-cloud/image-mcp/issues/new/choose). Do not include sensitive images or credentials in a public issue.
+
 ## What is this?
 
 ImageTools MCP is a **Model Context Protocol server** that gives AI assistants (Claude, etc.) full image-editing capabilities — from basic drawing to Photoshop-grade adjustments, AI-powered generation and editing, segmentation, and everything in between. All 242 tools work over an in-memory canvas with a Photoshop-style layer stack, undo/redo history, and non-destructive editing.
